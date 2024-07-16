@@ -9,43 +9,59 @@ Easy-Extension框架目标是提高`复杂系统的扩展性`，适用于系统�
 ![](/doc/target.png)
 
 # 框架使用Demo
+
 ```go
 package main
 
 import (
+	"context"
 	ee "github.com/xiaoshicae/go-easy-extension"
 )
 
+// Extension 扩展点
 type Extension interface {
 	DoSomething()
 }
 
 func main() {
-	// 注册默认能力，为匹配到任何扩展点实现时，默认兜底实现
-	_ = ee.RegisterDefaultAbility(ctx, &ability.DefaultAbility{})
-	// 注册能力
-	_ = ee.RegisterAbility(ctx, &ability.Ability1{})
-	// 注册业务
-	_ = ee.RegisterBusiness(ctx, &business.Business1{})
+	register() // 注册业务和能力
 
-	// 向你的ctx注入session，用于保存一起请求匹配的上下文信息
-	// http rpc框架，逻辑可以放在middleware
-	ctx = ee.NewCtxWithSession(ctx)
-    
-	// 每次请求都需要初始化session，MyParam用于业务和能力匹配
-	// http rpc框架，逻辑可以放在middleware
-	_ = ee.InitSession(ctx, param.MyParam{
-		Name:  "business_1", 
-		Extra: "ability_1 & ability_2",
-	})
+	ctx := context.Background() // 请求上下文
+	
+	ctx = initSession(ctx) // 每次处理请求前，需要初始化session
 
 	// 根据匹配到的业务，动态获取Extension的实现
 	ext, err := ee.GetFirstMatchedExtension[Extension](ctx)
 	if err != nil {
 		panic(err)
 	}
-	res := ext.DoSomething()
+	
+	res := ext.DoSomething() // 调用扩展点进行业务逻辑处理
 	fmt.Println(res)
+}
+
+func register() {
+	// 注册默认能力，为匹配到任何扩展点实现时，默认兜底实现
+	_ = ee.RegisterDefaultAbility(ctx, &ability.DefaultAbility{})
+	// 注册能力
+	_ = ee.RegisterAbility(ctx, &ability.Ability1{})
+	// 注册业务
+	_ = ee.RegisterBusiness(ctx, &business.Business1{})
+}
+
+func initSession(ctx context.Contextxt) context.Contextxt {
+	// 向你的ctx注入session，用于保存一起请求匹配的上下文信息
+	// http rpc框架，逻辑可以放在middleware
+	ctx = ee.NewCtxWithSession(ctx)
+
+	// 每次请求都需要初始化session，MyParam用于业务和能力匹配
+	// http rpc框架，逻辑可以放在middleware
+	_ = ee.InitSession(ctx, param.MyParam{
+		Name:  "business_1",
+		Extra: "ability_1 & ability_2",
+	})
+	
+	return ctx 
 }
 ```
 
