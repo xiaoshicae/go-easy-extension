@@ -43,12 +43,12 @@ b.Point[Freight](defaultImpl)  // Java: @DefaultImplementation
 | 启动期校验 | `Build()` 校验全部装配,返回 `*RegistrationError`(列出所有问题) |
 | 不可变 `ExtensionContext` / `Resolution` | `*Context[T]` / `*Resolution`,并发安全 |
 | ThreadLocal 绑定、`runWith` | `context.Context`:`ctx, err := c.Bind(ctx, param)`,`easyext.From(ctx)` 取出 |
-| `@ExtensionInject` 注入代理 | `easyext.Handle[E]`:可作为结构体字段的类型化访问器,`h.Get(ctx)` |
+| `@ExtensionInject` 注入代理 | Go 没有动态代理:在调用处 `easyext.First[E](ctx)` / `easyext.All[E](ctx)` |
 | `MatcherParamResolver` | 子包 `httpx`:`net/http` 中间件 |
-| `BusinessResolver` / `BusinessSelector` / 严格模式 | `WithBusinessResolver` / `WithBusinessSelector` / 默认严格 |
+| `BusinessResolver` / `BusinessSelector` / 严格模式 | `b.BusinessResolver(f)` / `b.BusinessSelector(f)` / `b.Strict(false)`,默认严格 |
 | `trace()` / `explain()` / `catalog()` | `res.Trace()` / `res.Explain[E]()` / `c.Catalog()` |
 | `ResolutionException(Reason)` | `*ResolutionError{Reason}`,配合 `errors.Is(err, easyext.ErrNoBusinessMatched)` 等 |
-| 日志:`Resolver` DEBUG | `WithLogger(*slog.Logger)`,默认不输出 |
+| 日志:`Resolver` DEBUG | `b.Logger(*slog.Logger)`,debug 级别,默认不输出 |
 
 ## 4. 语义
 
@@ -63,7 +63,7 @@ b.Point[Freight](defaultImpl)  // Java: @DefaultImplementation
 ## 5. 包结构
 
 ```
-easyext (根包)   Builder / Context / Resolution / Handle / 错误 / Trace / Catalog
+easyext (根包)   Builder / Context / Resolution / First / All / 错误 / Trace / Catalog
 httpx            net/http 中间件
 internal/...     测试用的夹具
 ```
