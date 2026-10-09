@@ -1,10 +1,8 @@
 package easyext
 
 import (
-	"fmt"
 	"log/slog"
 	"reflect"
-	"slices"
 )
 
 // Matcher decides, per request, whether a business or an ability applies to the param.
@@ -61,17 +59,15 @@ func Abilities(codes ...string) BusinessOption {
 type Builder[T any] struct {
 	points     []pointEntry
 	abilities  []abilityEntry[T]
-	businesses []businessEntry
+	businesses []businessEntry[T]
 	resolver   func(T) (string, bool)
-	selector   func(T, []string) (string, bool)
 	strict     bool
 	logger     *slog.Logger
-	problems   []string
 }
 
 type pointEntry struct {
 	typ  reflect.Type
-	impl any
+	impl any // the default implementation
 }
 
 type abilityEntry[T any] struct {
@@ -80,9 +76,9 @@ type abilityEntry[T any] struct {
 	opts abilityOptions
 }
 
-type businessEntry struct {
+type businessEntry[T any] struct {
 	code string
-	impl any
+	impl Matcher[T]
 	opts businessOptions
 }
 
@@ -94,17 +90,7 @@ func New[T any]() *Builder[T] {
 // Point registers extension point E, which must be an interface type, together with its default
 // implementation: the one that answers when neither the business nor any applicable ability implements E.
 func (b *Builder[T]) Point[E any](defaultImpl E) *Builder[T] {
-	t := reflect.TypeFor[E]()
-	switch {
-	case t.Kind() != reflect.Interface:
-		b.problems = append(b.problems, fmt.Sprintf("extension point %v is not an interface type", t))
-	case any(defaultImpl) == nil:
-		b.problems = append(b.problems, fmt.Sprintf("extension point %v: default implementation is nil", t))
-	case slices.ContainsFunc(b.points, func(p pointEntry) bool { return p.typ == t }):
-		b.problems = append(b.problems, fmt.Sprintf("extension point %v is registered more than once", t))
-	default:
-		b.points = append(b.points, pointEntry{typ: t, impl: defaultImpl})
-	}
+	b.points = append(b.points, pointEntry{typ: reflect.TypeFor[E](), impl: any(defaultImpl)})
 	return b
 }
 
@@ -119,10 +105,11 @@ func (b *Builder[T]) Ability(code string, impl Matcher[T], opts ...AbilityOption
 	return b
 }
 
-// Business registers an integration party. impl must implement [Matcher] of T unless a business resolver is
-// configured, and may implement extension points itself (or none: then only its abilities and the defaults answer).
-func (b *Builder[T]) Business(code string, impl any, opts ...BusinessOption) *Builder[T] {
-	e := businessEntry{code: code, impl: impl}
+// Business registers an integration party. impl identifies its requests with Match (ignored when a business
+// resolver routes requests) and may implement extension points itself, or none: then its abilities and the
+// defaults answer.
+func (b *Builder[T]) Business(code string, impl Matcher[T], opts ...BusinessOption) *Builder[T] {
+	e := businessEntry[T]{code: code, impl: impl}
 	for _, o := range opts {
 		o(&e.opts)
 	}
@@ -131,24 +118,16 @@ func (b *Builder[T]) Business(code string, impl any, opts ...BusinessOption) *Bu
 }
 
 // Strict sets strict mode (the default). Strict: no matching business, or several, is an error.
-// Not strict: no business means only default implementations answer; several are settled by the business
-// selector, or else by registration order.
+// Not strict: no business means only default implementations answer; of several, the first registered wins.
 func (b *Builder[T]) Strict(strict bool) *Builder[T] {
 	b.strict = strict
 	return b
 }
 
-// BusinessResolver routes requests to a business by code instead of asking every business to match.
-// Businesses then need not implement [Matcher]; their Match is ignored. ok == false means no business.
+// BusinessResolver routes requests to a business by code instead of asking every business to match;
+// Match is then not called. ok == false means no business.
 func (b *Builder[T]) BusinessResolver(resolve func(param T) (code string, ok bool)) *Builder[T] {
 	b.resolver = resolve
-	return b
-}
-
-// BusinessSelector chooses among several matching businesses (codes in registration order) when not strict.
-// ok == false means no business: only default implementations answer.
-func (b *Builder[T]) BusinessSelector(selectFn func(param T, matched []string) (code string, ok bool)) *Builder[T] {
-	b.selector = selectFn
 	return b
 }
 
@@ -161,7 +140,7 @@ func (b *Builder[T]) Logger(logger *slog.Logger) *Builder[T] {
 // Build validates the whole assembly and returns an immutable [Context], safe for concurrent use.
 // All problems are reported together in a [*RegistrationError].
 func (b *Builder[T]) Build() (*Context[T], error) {
-	v := validator[T]{b: b, problems: slices.Clone(b.problems)}
+	v := validator[T]{b: b}
 	c := v.compile()
 	if len(v.problems) > 0 {
 		return nil, &RegistrationError{Problems: v.problems}

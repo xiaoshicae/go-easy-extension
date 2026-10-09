@@ -28,7 +28,7 @@ const (
 	NoBusinessMatched
 	// MultipleBusinessesMatched: strict mode and more than one business matched the param.
 	MultipleBusinessesMatched
-	// BusinessNotFound: a business resolver or selector named a business that is not registered.
+	// BusinessNotFound: the business resolver returned the code of a business that is not registered.
 	BusinessNotFound
 	// ExtensionNotFound: the extension point was never registered with [Builder.Point].
 	ExtensionNotFound

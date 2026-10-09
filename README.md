@@ -55,6 +55,8 @@ func (Fresh) Calc(items int) int      { return 15 + 2*items }
 
 实现了哪些扩展点由类型自动推导,不需要额外声明。
 
+> 注意接收者:方法写在指针上(`func (*Fresh) Calc`)时要注册指针 `&Fresh{}`。按值注册时这些方法不属于值类型,`Build()` 会报错提示,而不是悄悄忽略。
+
 ### 2. 启动时装配
 
 ```go
@@ -102,7 +104,7 @@ mux.Handle("/checkout", httpx.Middleware(c, func(r *http.Request) (OrderParam, e
 
 ### 严格模式
 
-默认**每个请求必须恰好匹配一个业务**,否则 `Bind` / `Resolve` 返回错误(`ErrNoBusinessMatched` / `ErrMultipleBusinessesMatched`)。`.Strict(false)` 后:无匹配时只走默认实现;多个匹配时由 `BusinessSelector` 选择,未配置则取最先注册的。
+默认**每个请求必须恰好匹配一个业务**,否则 `Bind` / `Resolve` 返回错误(`ErrNoBusinessMatched` / `ErrMultipleBusinessesMatched`)。`.Strict(false)` 后:无匹配时只走默认实现;多个匹配时取最先注册的那个。
 
 ### 按 code 直达业务
 
@@ -111,7 +113,7 @@ easyext.New[OrderParam]().
     BusinessResolver(func(p OrderParam) (string, bool) { return "biz." + p.Biz, p.Biz != "" })
 ```
 
-配置后业务可以不实现 `Matcher`。
+配置后不再调用业务的 `Match`(业务类型仍需有 `Match` 方法,保证编译期类型检查)。
 
 ### 排查
 
@@ -119,7 +121,7 @@ easyext.New[OrderParam]().
 r, _ := c.Resolve(param)
 fmt.Println(r)               // Resolution[business=biz.fresh, chain=[biz.fresh], skipped=[ability.free-shipping]]
 r.Explain[Freight]()         // 该扩展点的所有候选,以及最终选了谁
-r.Trace()                    // 命中的业务、解析链、被跳过的能力、耗时
+r.Trace()                    // 命中的业务、解析链、被跳过的能力
 c.Catalog()                  // 全部扩展点/能力/业务的只读描述
 ```
 
@@ -139,7 +141,7 @@ Apple M 系列上的参考值(`go test -bench .`):
 
 | 操作 | 耗时 | 分配 |
 |---|---|---|
-| `Resolve`(一次请求解析一次) | ~150 ns | 8 次 |
+| `Resolve`(一次请求解析一次) | ~45 ns | 2 次 |
 | `First[E]` / `easyext.First[E](ctx)` | ~13 ns | 0 |
 
 ## 文档

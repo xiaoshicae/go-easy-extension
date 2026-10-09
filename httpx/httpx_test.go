@@ -80,6 +80,22 @@ func TestMiddleware(t *testing.T) {
 	}
 }
 
+// Two matching businesses is a problem of the assembly, not of the request: 500, not 422.
+func TestSeveralBusinessesIsAServerError(t *testing.T) {
+	c, err := easyext.New[shop.Param]().
+		Point[shop.Freight](shop.DefaultFreight{}).
+		Business("biz.fresh", shop.Fresh{}).
+		Business("biz.fresh-too", shop.Fresh{}).
+		Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := httpx.Middleware(c, paramFromRequest)(freightHandler)
+	if code, body := serve(h, "fresh", "/"); code != 500 || body != "Internal Server Error" {
+		t.Fatalf("got %d %q", code, body)
+	}
+}
+
 func TestOnError(t *testing.T) {
 	var got error
 	h := httpx.Middleware(newContext(t), paramFromRequest, httpx.OnError(func(w http.ResponseWriter, _ *http.Request, err error) {

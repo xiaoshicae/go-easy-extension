@@ -10,7 +10,7 @@ v1(`v1.0.0`)的问题,均已实测复现,并在 v2 中作为回归测试保留:
 | # | v1 的问题 | v2 的解法 |
 |---|---|---|
 | 1 | 扩展点用 `reflect.TypeOf(new(I)).String()` 作 key,只含包短名:不同包里的同名接口(都是 `*ext.Point`)被当成同一个扩展点 | 用 `reflect.TypeFor[E]()`(含完整导入路径)标识扩展点 |
-| 2 | 业务存在 map 里,非严格模式下多个业务同时匹配时随机选一个 | 业务按注册顺序保存,多匹配时按注册顺序或 `BusinessSelector` 决定 |
+| 2 | 业务存在 map 里,非严格模式下多个业务同时匹配时随机选一个 | 业务按注册顺序保存,非严格模式下取最先注册的那个 |
 | 3 | session 是放在 `context.Context` 里的**可变指针**,子 context 上 `RemoveSession` 会清掉父请求的结果 | 解析结果 `Resolution` 不可变,绑定就是 `context.WithValue` 派生出的新 context,天然隔离;不再有 Remove |
 | 4 | 并发 `InitSession` 有数据竞争(`go test -race` 可复现) | 构建后的 `Context` 只读,`Resolution` 不可变,无共享可变状态 |
 | 5 | 全局单例 + `SetEnableLogger` 等全局开关,测试之间互相污染 | 没有全局状态,`New[T]()...Build()` 得到独立的 `*Context[T]` |
@@ -45,7 +45,7 @@ b.Point[Freight](defaultImpl)  // Java: @DefaultImplementation
 | ThreadLocal 绑定、`runWith` | `context.Context`:`ctx, err := c.Bind(ctx, param)`,`easyext.From(ctx)` 取出 |
 | `@ExtensionInject` 注入代理 | Go 没有动态代理:在调用处 `easyext.First[E](ctx)` / `easyext.All[E](ctx)` |
 | `MatcherParamResolver` | 子包 `httpx`:`net/http` 中间件 |
-| `BusinessResolver` / `BusinessSelector` / 严格模式 | `b.BusinessResolver(f)` / `b.BusinessSelector(f)` / `b.Strict(false)`,默认严格 |
+| `BusinessResolver` / `BusinessSelector` / 严格模式 | `b.BusinessResolver(f)` / 不提供(非严格模式取最先注册的)/ `b.Strict(false)`,默认严格 |
 | `trace()` / `explain()` / `catalog()` | `res.Trace()` / `res.Explain[E]()` / `c.Catalog()` |
 | `ResolutionException(Reason)` | `*ResolutionError{Reason}`,配合 `errors.Is(err, easyext.ErrNoBusinessMatched)` 等 |
 | 日志:`Resolver` DEBUG | `b.Logger(*slog.Logger)`,debug 级别,默认不输出 |
@@ -53,14 +53,24 @@ b.Point[Freight](defaultImpl)  // Java: @DefaultImplementation
 ## 4. 语义
 
 - **解析链**:`[业务挂载的能力与业务自身,按 Abilities 顺序;只保留 Match 为 true 的能力] → 扩展点的默认实现`。
-- **First[E]**:链中第一个实现了 `E` 的,否则默认实现。`E` 未注册是编程错误,`First` panic(`ResolutionError{Reason: ExtensionNotFound}`);需要返回 error 时用 `Lookup[E]`。
+- **First[E]**:链中第一个实现了 `E` 的,否则默认实现。`E` 未注册是编程错误,`Resolution.First` panic(`ResolutionError{Reason: ExtensionNotFound}`);包级 `easyext.First[E](ctx)` 以 error 返回。
 - **All[E]**:链中所有实现了 `E` 的,按顺序,最后是默认实现;返回 `iter.Seq[E]`。
-- **业务选择**:配置了 `BusinessResolver` 时按 code 直达,业务可以不实现 `Matcher`;否则按注册顺序逐个 `Match`。
+- **业务选择**:配置了 `BusinessResolver` 时按 code 直达,不调用 `Match`;否则按注册顺序逐个 `Match`。业务注册时的类型就是 `Matcher[T]`,编译期检查。
   - 严格模式(缺省):0 个匹配 `NoBusinessMatched`,多个匹配 `MultipleBusinessesMatched`,resolver 给出未注册的 code `BusinessNotFound`。
-  - 非严格模式:没有业务时只走默认实现;多个匹配时由 `BusinessSelector` 选,未配置则取最先注册的。
+  - 非严格模式:没有业务时只走默认实现;多个匹配时取最先注册的(遇到第一个匹配即停止)。
 - **能力**是否生效在 `Resolve` 时立即求值,`Resolution` 是快照,不要跨请求复用。
 
-## 5. 包结构
+## 5. 设计取舍(v2 首轮 review 后的收敛)
+
+- **不提供 `BusinessSelector`**:只在"非严格 + 多业务匹配"时有用,默认取最先注册的;需要时再加,属于兼容的扩展。
+- **`Resolution` 不提供返回 error 的 `Lookup`**:取实现只有两种写法,`res.First[E]()`(未注册 panic)与 `easyext.First[E](ctx)`(返回 error)。
+- **`Business` 的参数类型是 `Matcher[T]`**:漏写 `Match` 在编译期发现;配置 `BusinessResolver` 时 `Match` 不会被调用。
+- **校验全部在 `Build()`**,包括"方法写在指针接收者上、却按值注册"(Go 特有的坑:这些方法会被悄悄忽略)。
+- **`Trace` 不记录耗时**:一次解析约 45 ns,单独计时(两次 `time.Now`,约 28 ns)得不偿失。
+- **日志惰性构造**:先判断 `Logger.Enabled(debug)`,关闭时不构造任何日志参数。`Resolve` 从约 148 ns / 8 次分配降到约 45 ns / 2 次分配。
+- **httpx 状态码**:无业务 / 未知业务是请求的问题(422);多个业务同时匹配是装配的问题(500)。
+
+## 6. 包结构
 
 ```
 easyext (根包)   Builder / Context / Resolution / First / All / 错误 / Trace / Catalog

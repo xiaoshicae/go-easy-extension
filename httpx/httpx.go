@@ -30,9 +30,12 @@ func OnError(h ErrorHandler) Option {
 // Middleware binds every request handled by next. param derives the matcher param from the request, e.g. from
 // a header, the path or the authenticated user; it should not consume the body.
 //
-// By default a param error answers 400 Bad Request and a resolution error (no business, several businesses,
-// unknown business) answers 422 Unprocessable Entity, with the status text only: the details, which may name
-// businesses, are left to [OnError].
+// Default responses, with the status text only (the details, which may name businesses, are left to [OnError]):
+//   - 400 Bad Request: the param function failed;
+//   - 422 Unprocessable Entity: the request identifies no business, or an unknown one ([easyext.ErrNoBusinessMatched],
+//     [easyext.ErrBusinessNotFound]): the caller has to fix the request;
+//   - 500 Internal Server Error: anything else, e.g. several businesses match ([easyext.ErrMultipleBusinessesMatched]),
+//     which is a problem of the assembly, not of the request.
 func Middleware[T any](c *easyext.Context[T], param func(*http.Request) (T, error), opts ...Option) func(http.Handler) http.Handler {
 	o := options{onError: defaultOnError}
 	for _, opt := range opts {
@@ -66,9 +69,10 @@ func (e *ParamError) Unwrap() error { return e.Err }
 
 func defaultOnError(w http.ResponseWriter, _ *http.Request, err error) {
 	status := http.StatusInternalServerError
-	if _, ok := errors.AsType[*ParamError](err); ok {
+	switch {
+	case errors.As(err, new(*ParamError)):
 		status = http.StatusBadRequest
-	} else if _, ok := errors.AsType[*easyext.ResolutionError](err); ok {
+	case errors.Is(err, easyext.ErrNoBusinessMatched), errors.Is(err, easyext.ErrBusinessNotFound):
 		status = http.StatusUnprocessableEntity
 	}
 	http.Error(w, http.StatusText(status), status)

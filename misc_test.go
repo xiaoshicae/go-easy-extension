@@ -2,6 +2,7 @@ package easyext_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"strings"
@@ -67,5 +68,19 @@ func TestAllAndExplainPanicOnUnregisteredPoint(t *testing.T) {
 			}()
 			call()
 		}()
+	}
+}
+
+func TestAllUnbound(t *testing.T) {
+	if _, err := easyext.All[shop.Freight](context.Background()); !errors.Is(err, easyext.ErrNoBinding) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestExplainSelectsTheDefault(t *testing.T) {
+	r := mustResolve(t, mustBuild(t, shopBuilder()), shop.Param{Biz: "retail"}) // retail implements no Freight
+	x := r.Explain[shop.Freight]()
+	if want := (easyext.Link{Code: "shop.DefaultFreight", Kind: easyext.KindDefault}); x.Selected != want {
+		t.Fatalf("selected = %+v, want %+v", x.Selected, want)
 	}
 }

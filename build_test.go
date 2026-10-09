@@ -15,6 +15,18 @@ type requiresFree struct{ shop.RapidDelivery }
 
 type excludesRapid struct{ shop.Return7Days }
 
+// ptrAbility: Match on the value, the extension point on the pointer.
+type ptrAbility struct{}
+
+func (ptrAbility) Match(shop.Param) bool     { return true }
+func (*ptrAbility) Freight(o shop.Order) int { return 1 }
+
+// mixedBusiness: same split; v1-style registration by value would silently drop Freight.
+type mixedBusiness struct{}
+
+func (mixedBusiness) Match(p shop.Param) bool   { return p.Biz == "mixed" }
+func (*mixedBusiness) Freight(o shop.Order) int { return 99 }
+
 func TestBuildValidation(t *testing.T) {
 	matchAll := easyext.MatcherFunc[shop.Param](func(shop.Param) bool { return true })
 	tests := []struct {
@@ -46,12 +58,21 @@ func TestBuildValidation(t *testing.T) {
 				Ability("ability.nil", nil).
 				Ability("ability.useless", matchAll).
 				Business("biz.nil", nil).
-				Business("biz.no-matcher", shop.DefaultFreight{})
+				Business("biz.uses-nil", matchAll, easyext.Abilities("ability.nil"))
 		}, []string{
 			`ability "ability.nil": implementation is nil`,
 			`ability "ability.useless" (easyext.MatcherFunc[...]) implements no registered extension point`,
 			`business "biz.nil": implementation is nil`,
-			`business "biz.no-matcher" (shop.DefaultFreight) does not implement Matcher[shop.Param] and no business resolver is configured`,
+			// biz.uses-nil mounts the invalid ability: no second "unknown ability" problem for it
+		}},
+		{"pointer receivers: registered by value, those methods would be ignored", func() *easyext.Builder[shop.Param] {
+			return easyext.New[shop.Param]().Point[shop.Freight](shop.DefaultFreight{}).
+				Ability("ability.ptr", ptrAbility{}).
+				Business("biz.mixed", mixedBusiness{}).
+				Business("biz.by-pointer", &mixedBusiness{}) // fine
+		}, []string{
+			`ability "ability.ptr": *easyext_test.ptrAbility implements shop.Freight but easyext_test.ptrAbility does not (pointer receiver): register a pointer`,
+			`business "biz.mixed": *easyext_test.mixedBusiness implements shop.Freight but easyext_test.mixedBusiness does not (pointer receiver): register a pointer`,
 		}},
 		{"abilities list", func() *easyext.Builder[shop.Param] {
 			return shopBuilder().Business("biz.x", matchAll,

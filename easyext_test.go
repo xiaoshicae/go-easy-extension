@@ -151,32 +151,6 @@ func TestSeveralMatchingBusinesses(t *testing.T) {
 			}
 		}
 	})
-	t.Run("not strict: selector decides", func(t *testing.T) {
-		var seen []string
-		c := mustBuild(t, builder().Strict(false).BusinessSelector(func(_ string, matched []string) (string, bool) {
-			seen = matched
-			return "biz.c", true
-		}))
-		if code, _ := mustResolve(t, c, "x").Business(); code != "biz.c" {
-			t.Fatalf("business = %q", code)
-		}
-		if !slices.Equal(seen, []string{"biz.a", "biz.b", "biz.c"}) {
-			t.Fatalf("selector saw %v", seen)
-		}
-	})
-	t.Run("not strict: selector names an unmatched business", func(t *testing.T) {
-		c := mustBuild(t, builder().Strict(false).BusinessSelector(func(string, []string) (string, bool) { return "biz.z", true }))
-		if _, err := c.Resolve("x"); !errors.Is(err, easyext.ErrBusinessNotFound) {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("not strict: selector declines, defaults answer", func(t *testing.T) {
-		c := mustBuild(t, builder().Strict(false).BusinessSelector(func(string, []string) (string, bool) { return "", false }))
-		r := mustResolve(t, c, "x")
-		if _, ok := r.Business(); ok || r.First[shop.Freight]().Freight(shop.Order{}) != 8 {
-			t.Fatalf("got %v", r)
-		}
-	})
 }
 
 func TestNoBusinessMatched(t *testing.T) {
@@ -199,7 +173,7 @@ func TestBusinessResolver(t *testing.T) {
 
 	c := mustBuild(t, easyext.New[shop.Param]().
 		Point[shop.AfterSale](shop.DefaultAfterSale{}).
-		Business("biz.digital", digitalNoMatcher{}).
+		Business("biz.digital", digitalRouted{}).
 		BusinessResolver(byBiz))
 	if got := mustResolve(t, c, shop.Param{Biz: "digital"}).First[shop.AfterSale]().ReturnDays(); got != 15 {
 		t.Fatalf("return days = %d", got)
@@ -215,24 +189,30 @@ func TestBusinessResolver(t *testing.T) {
 
 	lenient := mustBuild(t, easyext.New[shop.Param]().
 		Point[shop.AfterSale](shop.DefaultAfterSale{}).
-		Business("biz.digital", digitalNoMatcher{}).
+		Business("biz.digital", digitalRouted{}).
 		BusinessResolver(byBiz).Strict(false))
 	if got := mustResolve(t, lenient, shop.Param{Biz: "nope"}).First[shop.AfterSale]().ReturnDays(); got != 0 {
 		t.Fatalf("not strict, unknown code: return days = %d, want the default", got)
 	}
 }
 
-// digitalNoMatcher has no Match: allowed because a business resolver routes the requests.
-type digitalNoMatcher struct{}
+// digitalRouted is reached through the business resolver: its Match is not called (it would say no).
+type digitalRouted struct{}
 
-func (digitalNoMatcher) ReturnDays() int { return 15 }
+func (digitalRouted) Match(shop.Param) bool { return false }
+func (digitalRouted) ReturnDays() int       { return 15 }
 
 func TestUnregisteredExtensionPoint(t *testing.T) {
-	r := mustResolve(t, mustBuild(t, shopBuilder()), shop.Param{Biz: "fresh"})
-	_, err := r.Lookup[unregistered]()
-	if !errors.Is(err, easyext.ErrExtensionNotFound) {
-		t.Fatalf("Lookup: err = %v", err)
+	c := mustBuild(t, shopBuilder())
+	ctx, err := c.Bind(context.Background(), shop.Param{Biz: "fresh"})
+	if err != nil {
+		t.Fatal(err)
 	}
+	_, err = easyext.First[unregistered](ctx)
+	if !errors.Is(err, easyext.ErrExtensionNotFound) {
+		t.Fatalf("easyext.First: err = %v", err)
+	}
+	r := mustResolve(t, c, shop.Param{Biz: "fresh"})
 	if want := "easyext: EXTENSION_NOT_FOUND: extension point easyext_test.unregistered is not registered; register it with Builder.Point"; err.Error() != want {
 		t.Fatalf("message = %q", err.Error())
 	}

@@ -6,42 +6,40 @@ import (
 	"iter"
 	"log/slog"
 	"reflect"
-	"time"
 )
 
 // Context is a validated, immutable assembly built by [Builder.Build]. It is safe for concurrent use;
 // share one per application.
 type Context[T any] struct {
-	points     []pointEntry
-	defaults   map[reflect.Type]defaultEntry
-	abilities  map[string]compiledAbility[T]
-	businesses []compiledBusiness[T] // registration order
-	byCode     map[string]int
+	points     []pointEntry         // registration order
+	defaults   map[reflect.Type]any // extension point -> default implementation
+	abilities  []compiledAbility[T] // registration order
+	businesses []compiledBusiness[T]
+	byCode     map[string]int // business code -> index
 	strict     bool
 	resolver   func(T) (string, bool)
-	selector   func(T, []string) (string, bool)
 	logger     *slog.Logger
 	paramType  string
 }
 
-type defaultEntry struct {
-	name string
-	impl any
-}
-
 type compiledAbility[T any] struct {
-	code   string
-	impl   Matcher[T]
-	points []reflect.Type
-	opts   abilityOptions
+	code               string
+	impl               Matcher[T]
+	points             []reflect.Type
+	requires, excludes []string
 }
 
 type compiledBusiness[T any] struct {
-	code    string
-	impl    any
-	matcher Matcher[T] // nil when a business resolver routes requests
-	points  []reflect.Type
-	links   []link
+	code   string
+	impl   Matcher[T]
+	points []reflect.Type
+	steps  []step
+}
+
+// step is one entry of a business's resolution order: an ability (index into Context.abilities) or the
+// business itself (-1).
+type step struct {
+	ability int
 }
 
 // Kind tells what a link of a resolution chain is.
@@ -66,31 +64,27 @@ func (k Kind) String() string {
 	}
 }
 
-type link struct {
-	code string
-	kind Kind
-	impl any // set in a Resolution, nil in a compiled business
-}
-
 // Resolve resolves param without binding it anywhere: it selects the business and evaluates every ability
 // the business mounts, now. The result is an immutable snapshot; do not reuse it for another request.
 func (c *Context[T]) Resolve(param T) (*Resolution, error) {
-	start := time.Now()
+	debug := c.logger.Enabled(context.Background(), slog.LevelDebug)
 	b, err := c.selectBusiness(param)
 	if err != nil {
-		c.logger.Debug("easyext: resolution failed", slog.String("param", c.paramType), slog.Any("error", err))
+		if debug {
+			c.logger.Debug("easyext: resolution failed", slog.String("param", c.paramType), slog.Any("error", err))
+		}
 		return nil, err
 	}
 	r := &Resolution{defaults: c.defaults}
 	if b != nil {
 		r.business = b.code
-		r.chain = make([]link, 0, len(b.links))
-		for _, l := range b.links {
-			if l.kind == KindBusiness {
+		r.chain = make([]link, 0, len(b.steps))
+		for _, s := range b.steps {
+			if s.ability < 0 {
 				r.chain = append(r.chain, link{code: b.code, kind: KindBusiness, impl: b.impl})
 				continue
 			}
-			a := c.abilities[l.code]
+			a := &c.abilities[s.ability]
 			if a.impl.Match(param) {
 				r.chain = append(r.chain, link{code: a.code, kind: KindAbility, impl: a.impl})
 			} else {
@@ -98,9 +92,10 @@ func (c *Context[T]) Resolve(param T) (*Resolution, error) {
 			}
 		}
 	}
-	r.elapsed = time.Since(start)
-	c.logger.Debug("easyext: resolved", slog.String("business", r.business),
-		slog.Any("chain", r.chainCodes()), slog.Any("skipped", r.skipped), slog.Duration("elapsed", r.elapsed))
+	if debug {
+		c.logger.Debug("easyext: resolved", slog.String("business", r.business),
+			slog.Any("chain", r.chainCodes()), slog.Any("skipped", r.skipped))
+	}
 	return r, nil
 }
 
@@ -110,50 +105,45 @@ func (c *Context[T]) selectBusiness(param T) (*compiledBusiness[T], error) {
 		if !ok {
 			return c.noBusiness()
 		}
-		i, known := c.byCode[code]
-		if !known {
-			if c.strict {
-				return nil, &ResolutionError{Reason: BusinessNotFound,
-					Detail: fmt.Sprintf("business %q returned by the business resolver is not registered", code)}
-			}
-			return nil, nil
+		if i, known := c.byCode[code]; known {
+			return &c.businesses[i], nil
 		}
-		return &c.businesses[i], nil
-	}
-
-	var matched []*compiledBusiness[T]
-	for i := range c.businesses {
-		if c.businesses[i].matcher.Match(param) {
-			matched = append(matched, &c.businesses[i])
+		if c.strict {
+			return nil, &ResolutionError{Reason: BusinessNotFound,
+				Detail: fmt.Sprintf("business %q returned by the business resolver is not registered", code)}
 		}
-	}
-	switch {
-	case len(matched) == 0:
-		return c.noBusiness()
-	case len(matched) == 1:
-		return matched[0], nil
-	}
-	codes := make([]string, len(matched))
-	for i, b := range matched {
-		codes[i] = b.code
-	}
-	if c.strict {
-		return nil, &ResolutionError{Reason: MultipleBusinessesMatched, Detail: fmt.Sprintf("matched businesses %q", codes)}
-	}
-	if c.selector == nil {
-		return matched[0], nil // registration order: deterministic
-	}
-	code, ok := c.selector(param, codes)
-	if !ok {
 		return nil, nil
 	}
-	for _, b := range matched {
-		if b.code == code {
-			return b, nil
+
+	first := -1
+	for i := range c.businesses {
+		if !c.businesses[i].impl.Match(param) {
+			continue
+		}
+		if first < 0 {
+			first = i
+			if !c.strict {
+				break // not strict: the first registered match wins
+			}
+			continue
+		}
+		return nil, c.multipleMatched(param) // strict: a second match is an error
+	}
+	if first < 0 {
+		return c.noBusiness()
+	}
+	return &c.businesses[first], nil
+}
+
+// multipleMatched builds the error listing every matching business; only on the error path.
+func (c *Context[T]) multipleMatched(param T) error {
+	var codes []string
+	for i := range c.businesses {
+		if c.businesses[i].impl.Match(param) {
+			codes = append(codes, c.businesses[i].code)
 		}
 	}
-	return nil, &ResolutionError{Reason: BusinessNotFound,
-		Detail: fmt.Sprintf("business %q chosen by the business selector is not among the matched businesses %q", code, codes)}
+	return &ResolutionError{Reason: MultipleBusinessesMatched, Detail: fmt.Sprintf("matched businesses %q", codes)}
 }
 
 func (c *Context[T]) noBusiness() (*compiledBusiness[T], error) {
@@ -191,13 +181,14 @@ func From(ctx context.Context) (*Resolution, error) {
 }
 
 // First returns the implementation of extension point E for the resolution bound to ctx (see [Resolution.First]).
+// Unlike Resolution.First it reports an unregistered E as an error ([ExtensionNotFound]) instead of panicking.
 func First[E any](ctx context.Context) (E, error) {
 	r, err := From(ctx)
 	if err != nil {
 		var zero E
 		return zero, err
 	}
-	return r.Lookup[E]()
+	return r.lookup[E]()
 }
 
 // All returns every implementation of extension point E for the resolution bound to ctx (see [Resolution.All]).

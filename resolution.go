@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"time"
 )
 
 // Resolution is the immutable outcome of resolving one request param: the matched business and the
@@ -15,8 +14,13 @@ type Resolution struct {
 	business string // "" when no business matched (not strict)
 	chain    []link
 	skipped  []string
-	defaults map[reflect.Type]defaultEntry
-	elapsed  time.Duration
+	defaults map[reflect.Type]any // shared with the Context, read-only
+}
+
+type link struct {
+	code string
+	kind Kind
+	impl any
 }
 
 // Business returns the code of the matched business; ok is false when no business matched (not strict).
@@ -26,18 +30,17 @@ func (r *Resolution) Business() (code string, ok bool) {
 
 // First returns the implementation of extension point E: the first link of the chain (business and
 // applicable abilities, in precedence order) implementing E, else E's default implementation.
-// It panics with a [*ResolutionError] (reason [ExtensionNotFound]) if E was never registered,
-// which is a programming error; use [Resolution.Lookup] to get an error instead.
+// It panics with a [*ResolutionError] (reason [ExtensionNotFound]) if E was never registered, which is a
+// programming error; the package-level [First] returns that as an error instead.
 func (r *Resolution) First[E any]() E {
-	e, err := r.Lookup[E]()
+	e, err := r.lookup[E]()
 	if err != nil {
 		panic(err)
 	}
 	return e
 }
 
-// Lookup is like [Resolution.First] but returns an error if E was never registered.
-func (r *Resolution) Lookup[E any]() (E, error) {
+func (r *Resolution) lookup[E any]() (E, error) {
 	d, err := r.defaultOf[E]()
 	if err != nil {
 		var zero E
@@ -48,7 +51,7 @@ func (r *Resolution) Lookup[E any]() (E, error) {
 			return e, nil
 		}
 	}
-	return d.impl.(E), nil
+	return d.(E), nil
 }
 
 // All yields every implementation of extension point E: the links of the chain implementing E in precedence
@@ -64,15 +67,15 @@ func (r *Resolution) All[E any]() iter.Seq[E] {
 				return
 			}
 		}
-		yield(d.impl.(E))
+		yield(d.(E))
 	}
 }
 
-func (r *Resolution) defaultOf[E any]() (defaultEntry, error) {
+func (r *Resolution) defaultOf[E any]() (any, error) {
 	t := reflect.TypeFor[E]()
 	d, ok := r.defaults[t]
 	if !ok {
-		return defaultEntry{}, &ResolutionError{Reason: ExtensionNotFound,
+		return nil, &ResolutionError{Reason: ExtensionNotFound,
 			Detail: fmt.Sprintf("extension point %v is not registered; register it with Builder.Point", t)}
 	}
 	return d, nil
@@ -89,7 +92,6 @@ type Trace struct {
 	Business string   // "" when no business matched
 	Chain    []Link   // business and applicable abilities, in precedence order
 	Skipped  []string // abilities mounted by the business whose Match returned false
-	Elapsed  time.Duration
 }
 
 // Trace returns how this resolution was made.
@@ -98,7 +100,7 @@ func (r *Resolution) Trace() Trace {
 	for i, l := range r.chain {
 		chain[i] = Link{Code: l.code, Kind: l.kind}
 	}
-	return Trace{Business: r.business, Chain: chain, Skipped: slices.Clone(r.skipped), Elapsed: r.elapsed}
+	return Trace{Business: r.business, Chain: chain, Skipped: slices.Clone(r.skipped)}
 }
 
 // Candidate is a link of the chain considered for an extension point.
@@ -120,7 +122,7 @@ func (r *Resolution) Explain[E any]() Explanation {
 	if err != nil {
 		panic(err)
 	}
-	x := Explanation{Point: d.name}
+	x := Explanation{Point: reflect.TypeFor[E]().String()}
 	for _, l := range r.chain {
 		_, ok := l.impl.(E)
 		c := Candidate{Link: Link{Code: l.code, Kind: l.kind}, Implements: ok}
@@ -129,7 +131,7 @@ func (r *Resolution) Explain[E any]() Explanation {
 			x.Selected = c.Link
 		}
 	}
-	def := Link{Code: fmt.Sprintf("%T", d.impl), Kind: KindDefault}
+	def := Link{Code: fmt.Sprintf("%T", d), Kind: KindDefault}
 	x.Candidates = append(x.Candidates, Candidate{Link: def, Implements: true})
 	if x.Selected.Kind == 0 {
 		x.Selected = def

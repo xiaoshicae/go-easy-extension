@@ -10,9 +10,9 @@ import (
 type Catalog struct {
 	ParamType  string
 	Strict     bool
-	Points     []PointInfo
-	Abilities  []AbilityInfo
-	Businesses []BusinessInfo
+	Points     []PointInfo    // registration order
+	Abilities  []AbilityInfo  // registration order
+	Businesses []BusinessInfo // registration order
 }
 
 // PointInfo describes a registered extension point.
@@ -44,23 +44,17 @@ func (c *Context[T]) Catalog() Catalog {
 	for _, p := range c.points {
 		cat.Points = append(cat.Points, PointInfo{Type: p.typ.String(), Default: fmt.Sprintf("%T", p.impl)})
 	}
-	abilityCodes := make([]string, 0, len(c.abilities))
-	for code := range c.abilities {
-		abilityCodes = append(abilityCodes, code)
-	}
-	slices.Sort(abilityCodes)
-	for _, code := range abilityCodes {
-		a := c.abilities[code]
+	for _, a := range c.abilities {
 		cat.Abilities = append(cat.Abilities, AbilityInfo{Code: a.code, Type: fmt.Sprintf("%T", a.impl), Points: typeNames(a.points),
-			Requires: slices.Clone(a.opts.requires), Excludes: slices.Clone(a.opts.excludes)})
+			Requires: slices.Clone(a.requires), Excludes: slices.Clone(a.excludes)})
 	}
 	for _, b := range c.businesses {
-		order := make([]string, len(b.links))
-		for i, l := range b.links {
-			if l.kind == KindBusiness {
+		order := make([]string, len(b.steps))
+		for i, st := range b.steps {
+			if st.ability < 0 {
 				order[i] = Self
 			} else {
-				order[i] = l.code
+				order[i] = c.abilities[st.ability].code
 			}
 		}
 		cat.Businesses = append(cat.Businesses, BusinessInfo{Code: b.code, Type: fmt.Sprintf("%T", b.impl),
