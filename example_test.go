@@ -3,6 +3,10 @@ package easyext_test
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"strings"
 	"testing"
@@ -76,11 +80,11 @@ func ExampleResolution_All() {
 	if err != nil {
 		panic(err)
 	}
-	result, err := registry.Resolve(OrderParam{Biz: "fresh", FreeShipping: true})
+	extensions, err := registry.Resolve(OrderParam{Biz: "fresh", FreeShipping: true})
 	if err != nil {
 		panic(err)
 	}
-	sequence, err := result.All[Freight]()
+	sequence, err := extensions.All[Freight]()
 	if err != nil {
 		panic(err)
 	}
@@ -98,11 +102,11 @@ func ExampleResolution_Explain() {
 	if err != nil {
 		panic(err)
 	}
-	result, err := registry.Resolve(OrderParam{Biz: "fresh"})
+	extensions, err := registry.Resolve(OrderParam{Biz: "fresh"})
 	if err != nil {
 		panic(err)
 	}
-	x, err := result.Explain[Freight]()
+	x, err := extensions.Explain[Freight]()
 	if err != nil {
 		panic(err)
 	}
@@ -129,17 +133,91 @@ func ExampleBuilder_Build_invalid() {
 	// easyext: invalid assembly: business "biz.fresh": uses unknown ability "ability.missing"
 }
 
-func TestREADMEExampleMatchesExecutableSource(t *testing.T) {
+func TestREADMEExcerptsMatchExecutableSource(t *testing.T) {
 	readme, err := os.ReadFile("README.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	source, err := os.ReadFile("examples/shop/main.go")
-	if err != nil {
-		t.Fatal(err)
+	var blocks []string
+	for _, part := range strings.Split(string(readme), "```go\n")[1:] {
+		code, _, closed := strings.Cut(part, "\n```")
+		if !closed {
+			t.Fatal("README has an unclosed Go code block")
+		}
+		formatted, err := format.Source([]byte(code))
+		if err != nil {
+			t.Fatalf("README has an invalid Go code block: %v\n%s", err, code)
+		}
+		blocks = append(blocks, strings.TrimSpace(string(formatted)))
 	}
-	block := "```go\n" + strings.TrimSpace(string(source)) + "\n```"
-	if !strings.Contains(string(readme), block) {
-		t.Fatal("README's complete example differs from examples/shop/main.go")
+	for _, tc := range []struct {
+		path, declaration string
+		first, count      int // count == 0 selects the whole declaration
+	}{
+		{"examples/shop/points.go", "FreightCalc", 0, 0},
+		{"examples/shop/components.go", "Fresh.Abilities", 0, 0},
+		{"examples/shop/main.go", "run", 0, 2}, // assembly and error check
+		{"examples/shop/main.go", "run", 2, 1}, // inject the Registry into the service
+		{"examples/shop/service.go", "CheckoutService", 0, 0},
+		{"examples/shop/service.go", "CheckoutService.Checkout", 0, 4}, // point lookup and method call
+	} {
+		t.Run(tc.declaration+fmt.Sprint(tc.first), func(t *testing.T) {
+			source, err := os.ReadFile(tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, tc.path, source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var excerpt ast.Node
+			for _, decl := range file.Decls {
+				switch decl := decl.(type) {
+				case *ast.GenDecl:
+					for _, spec := range decl.Specs {
+						if spec, ok := spec.(*ast.TypeSpec); ok && spec.Name.Name == tc.declaration {
+							excerpt = decl
+						}
+					}
+				case *ast.FuncDecl:
+					name := decl.Name.Name
+					if decl.Recv != nil {
+						receiver := decl.Recv.List[0].Type
+						if pointer, ok := receiver.(*ast.StarExpr); ok {
+							receiver = pointer.X
+						}
+						if receiver, ok := receiver.(*ast.Ident); ok {
+							name = receiver.Name + "." + name
+						}
+					}
+					if name == tc.declaration {
+						excerpt = decl
+					}
+				}
+			}
+			if excerpt == nil {
+				t.Fatalf("declaration %s not found in %s", tc.declaration, tc.path)
+			}
+			start, end := excerpt.Pos(), excerpt.End()
+			if tc.count != 0 {
+				function := excerpt.(*ast.FuncDecl)
+				if len(function.Body.List) < tc.first+tc.count {
+					t.Fatal("example no longer has the expected startup statements")
+				}
+				start = function.Body.List[tc.first].Pos()
+				end = function.Body.List[tc.first+tc.count-1].End()
+			}
+			formatted, err := format.Source(source[fset.Position(start).Offset:fset.Position(end).Offset])
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, block := range blocks {
+				if block == strings.TrimSpace(string(formatted)) {
+					return
+				}
+			}
+			t.Fatalf("README's %s excerpt differs from %s", tc.declaration, tc.path)
+		})
 	}
 }

@@ -1,6 +1,6 @@
 // Package httpx binds net/http requests to a business: the middleware derives the param from the request,
-// resolves it and passes a bound context to the next handler. Use the same Registry's First or All
-// methods in downstream code; unrelated registries' bindings are not affected.
+// resolves it and passes a bound context to the next handler. Query points through the same Registry's
+// First and All methods; unrelated registries' bindings are not affected.
 //
 // Wrap only the routes that use extension points; health checks and the like then need no business identity.
 package httpx

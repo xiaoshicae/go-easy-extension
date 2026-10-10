@@ -38,7 +38,7 @@ Abilities 返回能力 Code 列表，用户无需理解 Mount、ProviderRef 或 
 
 RequiresAbilities 和 ExcludesAbilities 是独立的小接口，分别识别可选的 Requires / Excludes 方法；无约束组件不需要空方法。
 
-Code 显式、稳定、跨业务及能力唯一，不从类型名生成。共享 SDK 导出能力 Code 常量，业务使用常量引用能力；不在 Abilities 内实例化能力，也不自动注册引用到的组件。
+Code 必须非空、无首尾空白、不等于 Self，跨业务及能力唯一，不从类型名生成。共享 SDK 导出能力 Code 常量，业务使用常量引用能力；不在 Abilities 内实例化能力，也不自动注册引用到的组件。
 
 启动负责选用模块、构造组件和注入依赖；业务的可配置编排可通过构造函数传入，在 Build 时冻结为元数据快照。
 
@@ -46,7 +46,7 @@ Code 显式、稳定、跨业务及能力唯一，不从类型名生成。共享
 
 ```go
 registry, err := easyext.New[OrderParam]().
-    Point[Freight]().Point[Delivery]().Point[Notify]().
+    Point[FreightCalc]().Point[Delivery]().Point[Notify]().
     Default(&CommerceDefaults{}).
     Ability(&FreeShipping{}).Ability(&RapidDelivery{}).
     Business(&Fresh{}).Business(&Retail{}).
@@ -82,6 +82,15 @@ Build 每次创建独立的校验器和 Registry，不在 Builder 上积累上�
 
 Requires / Excludes 是静态共同挂载规则：
 
+```go
+func (*Installment) Requires() []string {
+    return []string{RiskControlCode}
+}
+func (*Installment) Excludes() []string {
+    return []string{CashOnlyCode}
+}
+```
+
 - Requires 不暗含运行期激活，不保证执行，也不规定先后顺序。
 - Excludes 拒绝同业务中的共同挂载，不只是同时 Match。
 - 引用必须是注册的 Ability，不能引用 Business 或 Self。
@@ -96,7 +105,7 @@ Requires / Excludes 是静态共同挂载规则：
 
 每个请求必须恰好匹配一个业务，0 个返回 NoBusinessMatched，多个返回 MultipleBusinessesMatched。没有 Strict(false)、注册顺序择优或备用路由器。多个匹配时直接使用已收集结果报错，不重新 Match。
 
-选中业务后只评价它使用的能力，每个能力一次，将其所有 Point 一起激活或关闭。结果存储业务的静态 plan 与只读 activation 数组，形成 Resolution 快照；不保存用于后续重新匹配的参数。
+选中业务后只评价它使用的能力，每个能力一次，将其所有 Point 一起激活或关闭。结果存储业务的静态 plan 与只读 activation 数组，形成 Resolution 快照；不保存用于后续重新匹配的参数。快照只属于这次请求，不跨请求复用。
 
 实现类型扫描、接口关系推导、字符串能力引用解析都在 Build 完成。First / All 使用按 Point 编译的稀疏候选索引，不在每次查询时扫描所有实现类型或所有 Point。
 
@@ -109,14 +118,24 @@ Requires / Excludes 是静态共同挂载规则：
 
 组件 Code 唯一、同指针 Code 一致、业务引用不重复，共同保证每个业务候选链中的 provider 不重复。All 只需识别默认实现是否已作为激活候选出现，无需维护逐查询去重集合。
 
+### 业务调用层
+
+应用示例优先使用 ctx 调用：入口 Bind 一次，下游通过同一个 Registry 的 First / All 查询 Point，再调用接口方法，不暴露请求级 result 包装。诊断时用 From(ctx) 取快照；需要不绑定的进阶用法时才显式 Resolve，返回的 Resolution 准确表达匹配快照语义，可用 extensions 命名而非业务计算结果。
+
+Service 在启动时注入 Registry，不缓存请求选中的 Point 实现；每次调用根据传入 ctx 查询。单元测试将 fake 实现注册为测试 Registry 的默认实现，并注册一个只负责匹配的 Business 即可。不增加额外的服务查询接口或请求级组合包装。
+
+Matcher 参数由入口生成，各 Point 方法只接收自身所需的业务参数。商店示例按契约、组件、Service 和启动装配拆分，能力根据会员、金额、地区和件数等请求事实匹配，而非能力开关。示例采用常见的 context.Context 首参和 error 返回值，但框架不规定 Point 的方法签名。
+
+框架只选择实现，不替调用方执行扩展方法。实现返回 error 不触发自动降级；All 的遍历、错误传播和结果合并语义由业务流程表达，不自动广播，也不为每种扩展方法增加 Call / Execute 包装。
+
 ## 7. Registry 隔离绑定
 
 Registry 和 context.Context 是不同概念，使用明确的 Registry 名称。
 
 ```go
 ctx, err := registry.Bind(ctx, param)
-impl, err := registry.First[Freight](ctx)
-result, err := registry.From(ctx)
+impl, err := registry.First[FreightCalc](ctx)
+extensions, err := registry.From(ctx)
 ```
 
 每次 Build 分配独立、非零大小的私有绑定 key：
@@ -152,7 +171,9 @@ Registry 和 Resolution 的结构不可变，但它们共享用户提供的组�
 - 未注册 Point 的统一错误，父子绑定、跨 Registry 与同 Builder 多次 Build 隔离。
 - HTTP 正常、参数失败、匹配失败、歧义和嵌套 Registry 中间件。
 - 并发共享 Registry / Resolution，执行 race 检查。
-- README 中的完整示例与可执行源码一致，示例输出进入测试。
+- README 中的关键代码片段与可执行源码一致，代码块通过语法格式检查，示例输出进入测试。
+- Service 直接查询 Point：缺少绑定、未注册 Point、父子/跨 Registry 隔离、并发请求、业务错误传播与停止后续调用。
+- 测试 Registry 注册 fake 实现，验证方法参数、同一个 ctx 的传递、取消传播及 All 调用顺序。
 - Fuzz 将多业务、多 Point、能力顺序、激活组合及共享默认身份，与直接接口扫描对照；静态约束与独立位集合闭包对照。
 
 benchmark 覆盖不同业务数、挂载能力数、Point 数及无约束 / 依赖链 / 带排斥的依赖链的装配开销；不沿用旧版小 fixture 的耗时。
@@ -168,3 +189,41 @@ benchmark 覆盖不同业务数、挂载能力数、Point 数及无约束 / 依�
 - examples/shop：README 的完整可运行示例。
 
 没有第三方依赖；没有兼容旧 API 的入口。
+
+## 11. 从 v2 升级
+
+v3 不提供兼容层。import 路径改为 `github.com/xiaoshicae/go-easy-extension/v3`，组件自己声明元数据，每个请求必须恰好匹配一个业务。
+
+| v2.0.0 | v3 |
+|---|---|
+| `Build()` 返回 `*easyext.Context[T]` | 返回 `*easyext.Registry[P]` |
+| `Point[E](defaultImpl)` | `Point[E]()` 加 `Default(impl)`（覆盖它实现的所有已注册 Point）或 `DefaultFor[E](impl)` |
+| `Ability(code, impl, easyext.Requires(...), easyext.Excludes(...))` | 组件实现 `Code() string`，可选实现 `Requires() []string`、`Excludes() []string`，然后 `Ability(impl)` |
+| `Business(code, impl, easyext.Abilities(...))` | 组件实现 `Code() string`、`Abilities() []string`，然后 `Business(impl)` |
+| `Strict(false)`：没有业务时走默认实现，多个业务时取先注册的 | 删除；每个请求必须恰好匹配一个业务 |
+| `BusinessResolver(func(T) (string, bool))` | 删除；每个业务用自己的 `Match` 识别请求 |
+| `Reason` 常量 `BusinessNotFound` / `ErrBusinessNotFound` | 删除；`ExtensionNotFound` 的数值从 5 变为 4，请按常量比较 |
+| `easyext.WithResolution(ctx, r)` | 删除；用 `registry.Bind(ctx, param)` |
+| 包级 `easyext.From` / `First[E]` / `All[E]`(ctx) | `registry.From` / `registry.First[E]` / `registry.All[E]`(ctx)，绑定按 Registry 隔离 |
+| `result.First[E]() E`（未注册时 panic） | 绑定后用 `registry.First[E](ctx) (E, error)`，未注册返回 `ErrExtensionNotFound` |
+| `result.All[E]() iter.Seq[E]` | 绑定后用 `registry.All[E](ctx) (iter.Seq[E], error)` |
+| `result.Explain[E]() Explanation` | `registry.From(ctx)` 后调用 `extensions.Explain[E]() (Explanation, error)` |
+| `result.Business() (code string, ok bool)` | `registry.From(ctx)` 后调用 `extensions.Business() string`（总有业务） |
+| `httpx.Middleware(*easyext.Context[T], ...)` | `httpx.Middleware(*easyext.Registry[P], ...)` |
+
+## 12. 开发验证
+
+在仓库根目录执行：
+
+```sh
+go test ./...
+go test -race -count=1 ./...
+go vet ./...
+go test -run '^$' -bench . -benchmem
+go test -run '^$' -fuzz '^FuzzResolutionMatchesReference$' -fuzztime=10s
+go test -run '^$' -fuzz '^FuzzConstraintsMatchReference$' -fuzztime=10s
+```
+
+随机测试使用独立的直接接口扫描和位集合闭包，对照查询顺序、共享默认去重、匹配次数及约束可满足性。基准覆盖不同业务数、能力数、Point 数及约束下的装配开销；性能以目标机器实测为准，不沿用旧 API 的数字。
+
+使用 Go 1.27 配套的工具。`go` 自动切换工具链时，PATH 中独立的旧 `gofmt` 不一定随之切换。

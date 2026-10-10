@@ -28,10 +28,15 @@
 // active implementations followed by the default, deduplicating shared providers. Queries return errors
 // for unregistered points, not lookup panics.
 //
-// Either pass the Resolution explicitly or bind once and query through the same Registry:
+// Bind once at the request entry and inject the Registry into services. Services query point interfaces
+// using the same bound context, then call the selected implementation's ordinary methods:
 //
 //	ctx, err := registry.Bind(ctx, param)
 //	freight, err := registry.First[Freight](ctx)
+//
+// Point methods are ordinary Go interface methods with no framework-specific signature requirements.
+// Resolve is available when an explicit Resolution is needed instead of a context binding; extensions is
+// a useful variable name for this selection snapshot, not the business methods' computed result.
 //
 // Bindings are isolated by Registry identity and follow context.Context into child scopes and goroutines.
 // Registry and Resolution are safe to share, but implementations themselves must be safe for concurrent calls.
