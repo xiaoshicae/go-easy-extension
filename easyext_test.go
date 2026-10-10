@@ -7,72 +7,98 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/xiaoshicae/go-easy-extension/v2"
-	pa "github.com/xiaoshicae/go-easy-extension/v2/internal/fixtures/a"
-	pb "github.com/xiaoshicae/go-easy-extension/v2/internal/fixtures/b"
-	"github.com/xiaoshicae/go-easy-extension/v2/internal/fixtures/shop"
+	"github.com/xiaoshicae/go-easy-extension/v3"
+	pa "github.com/xiaoshicae/go-easy-extension/v3/internal/fixtures/a"
+	pb "github.com/xiaoshicae/go-easy-extension/v3/internal/fixtures/b"
+	"github.com/xiaoshicae/go-easy-extension/v3/internal/fixtures/shop"
 )
 
-// shopBuilder assembles the e-commerce fixture; tests add or change options on top of it.
 func shopBuilder() *easyext.Builder[shop.Param] {
 	return easyext.New[shop.Param]().
-		Point[shop.Freight](shop.DefaultFreight{}).
-		Point[shop.AfterSale](shop.DefaultAfterSale{}).
-		Point[shop.Notify](shop.DefaultNotify{}).
-		Ability("ability.free-shipping", shop.FreeShipping{}).
-		Ability("ability.return-7d", shop.Return7Days{}).
-		Ability("ability.rapid", shop.RapidDelivery{}).
-		Business("biz.retail", shop.Retail{}, easyext.Abilities("ability.free-shipping", "ability.return-7d")).
-		Business("biz.fresh", shop.Fresh{}, easyext.Abilities("ability.free-shipping", "ability.rapid", easyext.Self)).
-		Business("biz.digital", shop.Digital{}, easyext.Abilities("ability.return-7d", easyext.Self))
+		Point[shop.Freight]().Point[shop.AfterSale]().Point[shop.Notify]().Point[shop.Delivery]().
+		Default(shop.Defaults{}).
+		Ability(shop.FreeShipping{}).Ability(shop.Return7Days{}).Ability(shop.RapidDelivery{}).
+		Business(shop.Retail{}).Business(shop.Fresh{}).Business(shop.Digital{})
 }
 
-func mustBuild[T any](t testing.TB, b *easyext.Builder[T]) *easyext.Context[T] {
+func mustBuild[P any](t testing.TB, builder *easyext.Builder[P]) *easyext.Registry[P] {
 	t.Helper()
-	c, err := b.Build()
+	registry, err := builder.Build()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c
+	return registry
 }
 
-func mustResolve[T any](t testing.TB, c *easyext.Context[T], p T) *easyext.Resolution {
+func mustResolve[P any](t testing.TB, registry *easyext.Registry[P], param P) *easyext.Resolution {
 	t.Helper()
-	r, err := c.Resolve(p)
+	result, err := registry.Resolve(param)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return r
+	return result
 }
+
+func first[E any](t testing.TB, result *easyext.Resolution) E {
+	t.Helper()
+	impl, err := result.First[E]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return impl
+}
+
+func all[E any](t testing.TB, result *easyext.Resolution) []E {
+	t.Helper()
+	sequence, err := result.All[E]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return slices.Collect(sequence)
+}
+
+type testBusiness[P any] struct {
+	code  string
+	used  []string
+	match func(P) bool
+}
+
+func (b *testBusiness[P]) Code() string        { return b.code }
+func (b *testBusiness[P]) Abilities() []string { return b.used }
+func (b *testBusiness[P]) Match(p P) bool      { return b.match == nil || b.match(p) }
 
 func TestFirstFollowsAbilitiesOrder(t *testing.T) {
-	c := mustBuild(t, shopBuilder())
-	order := shop.Order{Items: 3}
+	registry := mustBuild(t, shopBuilder())
 	tests := []struct {
 		name       string
 		param      shop.Param
 		freight    int
 		returnDays int
+		delivery   int
 		channels   []string
 	}{
-		{"fresh alone: its own cold-chain freight", shop.Param{Biz: "fresh"}, 21, 0, []string{"PUSH"}},
-		{"free shipping is listed before Self: it overrides fresh", shop.Param{Biz: "fresh", Abilities: []string{"free-shipping"}}, 0, 0, []string{"PUSH"}},
-		{"rapid delivery adds channels", shop.Param{Biz: "fresh", Abilities: []string{"rapid"}}, 21, 0, []string{"SMS", "PUSH", "WECHAT_MSG"}},
-		{"digital alone: its own 15 days", shop.Param{Biz: "digital"}, 8, 15, []string{"PUSH"}},
-		{"return-7d is listed before Self: it overrides digital", shop.Param{Biz: "digital", Abilities: []string{"return-7d"}}, 8, 7, []string{"PUSH"}},
-		{"retail implements nothing: abilities, then defaults", shop.Param{Biz: "retail", Abilities: []string{"free-shipping"}}, 0, 0, []string{"PUSH"}},
-		{"ability not mounted by the business is ignored", shop.Param{Biz: "digital", Abilities: []string{"free-shipping"}}, 8, 15, []string{"PUSH"}},
+		{"fresh overrides freight and delivery", shop.Param{Biz: "fresh"}, 21, 0, 2, []string{"PUSH"}},
+		{"free shipping overrides fresh", shop.Param{Biz: "fresh", Abilities: []string{"free-shipping"}}, 0, 0, 2, []string{"PUSH"}},
+		{"one rapid ability supplies two points", shop.Param{Biz: "fresh", Abilities: []string{"rapid"}}, 21, 0, 1, []string{"SMS", "PUSH", "WECHAT_MSG"}},
+		{"digital supplies after sale", shop.Param{Biz: "digital"}, 8, 15, 3, []string{"PUSH"}},
+		{"return ability precedes digital", shop.Param{Biz: "digital", Abilities: []string{"return-7d"}}, 8, 7, 3, []string{"PUSH"}},
+		{"retail is only a composition", shop.Param{Biz: "retail", Abilities: []string{"free-shipping"}}, 0, 0, 3, []string{"PUSH"}},
+		{"shared rapid ability in another business", shop.Param{Biz: "retail", Abilities: []string{"rapid"}}, 8, 0, 1, []string{"SMS", "PUSH", "WECHAT_MSG"}},
+		{"unmounted abilities ignored", shop.Param{Biz: "digital", Abilities: []string{"free-shipping", "rapid"}}, 8, 15, 3, []string{"PUSH"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := mustResolve(t, c, tt.param)
-			if got := r.First[shop.Freight]().Freight(order); got != tt.freight {
+			result := mustResolve(t, registry, tt.param)
+			if got := first[shop.Freight](t, result).Freight(shop.Order{Items: 3}); got != tt.freight {
 				t.Errorf("freight = %d, want %d", got, tt.freight)
 			}
-			if got := r.First[shop.AfterSale]().ReturnDays(); got != tt.returnDays {
+			if got := first[shop.AfterSale](t, result).ReturnDays(); got != tt.returnDays {
 				t.Errorf("return days = %d, want %d", got, tt.returnDays)
 			}
-			if got := r.First[shop.Notify]().Channels(); !slices.Equal(got, tt.channels) {
+			if got := first[shop.Delivery](t, result).DeliveryDays(); got != tt.delivery {
+				t.Errorf("delivery = %d, want %d", got, tt.delivery)
+			}
+			if got := first[shop.Notify](t, result).Channels(); !slices.Equal(got, tt.channels) {
 				t.Errorf("channels = %v, want %v", got, tt.channels)
 			}
 		})
@@ -80,34 +106,27 @@ func TestFirstFollowsAbilitiesOrder(t *testing.T) {
 }
 
 func TestAllYieldsChainThenDefault(t *testing.T) {
-	c := mustBuild(t, shopBuilder())
-	r := mustResolve(t, c, shop.Param{Biz: "fresh", Abilities: []string{"free-shipping"}})
-	var got []int
-	for f := range r.All[shop.Freight]() {
-		got = append(got, f.Freight(shop.Order{Items: 3}))
+	result := mustResolve(t, mustBuild(t, shopBuilder()), shop.Param{Biz: "fresh", Abilities: []string{"free-shipping"}})
+	sequence, err := result.All[shop.Freight]()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if want := []int{0, 21, 8}; !slices.Equal(got, want) { // free shipping, fresh, default
-		t.Fatalf("All = %v, want %v", got, want)
+	for range 2 {
+		var got []int
+		for impl := range sequence {
+			got = append(got, impl.Freight(shop.Order{Items: 3}))
+		}
+		if !slices.Equal(got, []int{0, 21, 8}) {
+			t.Fatalf("All = %v", got)
+		}
 	}
 	n := 0
-	for range r.All[shop.Freight]() { // stops early
+	for range sequence {
 		n++
 		break
 	}
 	if n != 1 {
-		t.Fatalf("break after first: yielded %d", n)
-	}
-}
-
-// v1 keyed extension points by reflect.TypeOf(new(I)).String(): both of these were "*ext.Point".
-func TestSameNamedPointsInDifferentPackagesAreDistinct(t *testing.T) {
-	c := mustBuild(t, easyext.New[string]().
-		Point[pa.Point](namedA("default-a")).
-		Point[pb.Point](namedB("default-b")).
-		Business("biz", easyext.MatcherFunc[string](func(string) bool { return true })))
-	r := mustResolve(t, c, "x")
-	if a, b := r.First[pa.Point]().Name(), r.First[pb.Point]().Name(); a != "default-a" || b != "default-b" {
-		t.Fatalf("got %q and %q", a, b)
+		t.Fatalf("early break: yielded %d", n)
 	}
 }
 
@@ -119,198 +138,174 @@ type namedB string
 
 func (n namedB) Name() string { return string(n) }
 
-type always string
-
-func (always) Match(string) bool        { return true }
-func (a always) Freight(shop.Order) int { return len(a) }
-
-// v1 kept businesses in a map: with several matches it picked one at random.
-func TestSeveralMatchingBusinesses(t *testing.T) {
-	builder := func() *easyext.Builder[string] {
-		b := easyext.New[string]().Point[shop.Freight](shop.DefaultFreight{})
-		for _, code := range []string{"biz.a", "biz.b", "biz.c"} {
-			b.Business(code, always(code))
-		}
-		return b
+func TestSameNamedPointsInDifferentPackagesAreDistinct(t *testing.T) {
+	registry := mustBuild(t, easyext.New[string]().
+		Point[pa.Point]().Point[pb.Point]().
+		DefaultFor[pa.Point](namedA("default-a")).
+		DefaultFor[pb.Point](namedB("default-b")).
+		Business(&testBusiness[string]{code: "biz"}))
+	result := mustResolve(t, registry, "x")
+	if a, b := first[pa.Point](t, result).Name(), first[pb.Point](t, result).Name(); a != "default-a" || b != "default-b" {
+		t.Fatalf("got %q and %q", a, b)
 	}
+}
 
-	t.Run("strict: error listing the businesses", func(t *testing.T) {
-		_, err := mustBuild(t, builder()).Resolve("x")
-		if !errors.Is(err, easyext.ErrMultipleBusinessesMatched) {
-			t.Fatalf("err = %v", err)
-		}
-		if want := `easyext: MULTIPLE_BUSINESSES_MATCHED: matched businesses ["biz.a" "biz.b" "biz.c"]`; err.Error() != want {
-			t.Fatalf("message = %q, want %q", err.Error(), want)
-		}
-	})
-	t.Run("not strict: registration order, every time", func(t *testing.T) {
-		c := mustBuild(t, builder().Strict(false))
-		for range 200 {
-			if code, _ := mustResolve(t, c, "x").Business(); code != "biz.a" {
-				t.Fatalf("business = %q", code)
-			}
-		}
-	})
+func TestSeveralMatchingBusinesses(t *testing.T) {
+	builder := easyext.New[string]().Point[shop.Freight]().Default(shop.DefaultFreight{})
+	counts := make([]int, 4)
+	for i, code := range []string{"biz.a", "biz.b", "biz.c", "biz.no"} {
+		builder.Business(&testBusiness[string]{code: code, match: func(string) bool {
+			counts[i]++
+			return i != 3
+		}})
+	}
+	_, err := mustBuild(t, builder).Resolve("x")
+	if !errors.Is(err, easyext.ErrMultipleBusinessesMatched) {
+		t.Fatalf("err = %v", err)
+	}
+	if want := "easyext: MULTIPLE_BUSINESSES_MATCHED: matched businesses [\"biz.a\" \"biz.b\" \"biz.c\"]"; err.Error() != want {
+		t.Fatalf("message = %q, want %q", err.Error(), want)
+	}
+	if !slices.Equal(counts, []int{1, 1, 1, 1}) {
+		t.Fatalf("businesses rematched: %v", counts)
+	}
 }
 
 func TestNoBusinessMatched(t *testing.T) {
-	_, err := mustBuild(t, shopBuilder()).Resolve(shop.Param{Biz: "unknown"})
-	if !errors.Is(err, easyext.ErrNoBusinessMatched) || err.Error() != "easyext: NO_BUSINESS_MATCHED: no business matched" {
+	registry := mustBuild(t, shopBuilder())
+	_, err := registry.Resolve(shop.Param{Biz: "unknown"})
+	if !errors.Is(err, easyext.ErrNoBusinessMatched) || err.Error() != "easyext: NO_BUSINESS_MATCHED: none of the 3 registered businesses matched" {
 		t.Fatalf("err = %v", err)
 	}
-
-	r := mustResolve(t, mustBuild(t, shopBuilder().Strict(false)), shop.Param{Biz: "unknown", Abilities: []string{"free-shipping"}})
-	if _, ok := r.Business(); ok {
-		t.Fatal("expected no business")
+	ctx := context.Background()
+	got, err := registry.Bind(ctx, shop.Param{Biz: "unknown"})
+	if got != ctx || !errors.Is(err, easyext.ErrNoBusinessMatched) {
+		t.Fatalf("failed Bind changed context: %v, %v", got, err)
 	}
-	if got := r.First[shop.Freight]().Freight(shop.Order{}); got != 8 { // abilities need a business to mount them
-		t.Fatalf("freight = %d, want the default 8", got)
-	}
-}
-
-func TestBusinessResolver(t *testing.T) {
-	byBiz := func(p shop.Param) (string, bool) { return "biz." + p.Biz, p.Biz != "" }
-
-	c := mustBuild(t, easyext.New[shop.Param]().
-		Point[shop.AfterSale](shop.DefaultAfterSale{}).
-		Business("biz.digital", digitalRouted{}).
-		BusinessResolver(byBiz))
-	if got := mustResolve(t, c, shop.Param{Biz: "digital"}).First[shop.AfterSale]().ReturnDays(); got != 15 {
-		t.Fatalf("return days = %d", got)
-	}
-	if _, err := c.Resolve(shop.Param{}); !errors.Is(err, easyext.ErrNoBusinessMatched) {
-		t.Fatalf("resolver declined: err = %v", err)
-	}
-	_, err := c.Resolve(shop.Param{Biz: "nope"})
-	if !errors.Is(err, easyext.ErrBusinessNotFound) ||
-		err.Error() != `easyext: BUSINESS_NOT_FOUND: business "biz.nope" returned by the business resolver is not registered` {
-		t.Fatalf("unknown code: err = %v", err)
-	}
-
-	lenient := mustBuild(t, easyext.New[shop.Param]().
-		Point[shop.AfterSale](shop.DefaultAfterSale{}).
-		Business("biz.digital", digitalRouted{}).
-		BusinessResolver(byBiz).Strict(false))
-	if got := mustResolve(t, lenient, shop.Param{Biz: "nope"}).First[shop.AfterSale]().ReturnDays(); got != 0 {
-		t.Fatalf("not strict, unknown code: return days = %d, want the default", got)
-	}
-}
-
-// digitalRouted is reached through the business resolver: its Match is not called (it would say no).
-type digitalRouted struct{}
-
-func (digitalRouted) Match(shop.Param) bool { return false }
-func (digitalRouted) ReturnDays() int       { return 15 }
-
-func TestUnregisteredExtensionPoint(t *testing.T) {
-	c := mustBuild(t, shopBuilder())
-	ctx, err := c.Bind(context.Background(), shop.Param{Biz: "fresh"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = easyext.First[unregistered](ctx)
-	if !errors.Is(err, easyext.ErrExtensionNotFound) {
-		t.Fatalf("easyext.First: err = %v", err)
-	}
-	r := mustResolve(t, c, shop.Param{Biz: "fresh"})
-	if want := "easyext: EXTENSION_NOT_FOUND: extension point easyext_test.unregistered is not registered; register it with Builder.Point"; err.Error() != want {
-		t.Fatalf("message = %q", err.Error())
-	}
-	defer func() {
-		re, ok := errors.AsType[*easyext.ResolutionError](recover().(error))
-		if !ok || re.Reason != easyext.ExtensionNotFound {
-			t.Fatalf("First should panic with a ResolutionError, got %v", re)
-		}
-	}()
-	r.First[unregistered]()
 }
 
 type unregistered interface{ X() }
 
-func TestTraceExplainString(t *testing.T) {
-	c := mustBuild(t, shopBuilder())
-	r := mustResolve(t, c, shop.Param{Biz: "fresh", Abilities: []string{"rapid"}})
-
-	tr := r.Trace()
-	// fresh mounts free-shipping, rapid, Self; free-shipping does not match, so the chain is rapid, then fresh.
-	wantChain := []easyext.Link{{Code: "ability.rapid", Kind: easyext.KindAbility}, {Code: "biz.fresh", Kind: easyext.KindBusiness}}
-	if tr.Business != "biz.fresh" || !slices.Equal(tr.Chain, wantChain) || !slices.Equal(tr.Skipped, []string{"ability.free-shipping"}) {
-		t.Fatalf("trace = %+v", tr)
+func TestUnregisteredExtensionPointReturnsErrors(t *testing.T) {
+	registry := mustBuild(t, shopBuilder())
+	result := mustResolve(t, registry, shop.Param{Biz: "fresh"})
+	ctx, err := registry.Bind(context.Background(), shop.Param{Biz: "fresh"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := r.String(); got != "Resolution[business=biz.fresh, chain=[ability.rapid biz.fresh], skipped=[ability.free-shipping]]" {
-		t.Fatalf("String() = %q", got)
+	calls := map[string]func() error{
+		"Resolution.First":   func() error { _, err := result.First[unregistered](); return err },
+		"Resolution.All":     func() error { _, err := result.All[unregistered](); return err },
+		"Resolution.Explain": func() error { _, err := result.Explain[unregistered](); return err },
+		"Registry.First":     func() error { _, err := registry.First[unregistered](ctx); return err },
+		"Registry.All":       func() error { _, err := registry.All[unregistered](ctx); return err },
 	}
-
-	x := r.Explain[shop.Freight]()
-	if x.Point != "shop.Freight" || x.Selected != (easyext.Link{Code: "biz.fresh", Kind: easyext.KindBusiness}) {
-		t.Fatalf("explain = %+v", x)
-	}
-	if n := len(x.Candidates); n != 3 || x.Candidates[0].Implements || !x.Candidates[1].Implements ||
-		x.Candidates[2].Link != (easyext.Link{Code: "shop.DefaultFreight", Kind: easyext.KindDefault}) {
-		t.Fatalf("candidates = %+v", x.Candidates)
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			if err := call(); !errors.Is(err, easyext.ErrExtensionNotFound) {
+				t.Fatalf("err = %v", err)
+			}
+		})
 	}
 }
 
-func TestBindIsPerContext(t *testing.T) {
-	c := mustBuild(t, shopBuilder())
-	if _, err := easyext.From(context.Background()); !errors.Is(err, easyext.ErrNoBinding) {
-		t.Fatalf("unbound: err = %v", err)
+func TestTraceExplainString(t *testing.T) {
+	result := mustResolve(t, mustBuild(t, shopBuilder()), shop.Param{Biz: "fresh", Abilities: []string{"rapid"}})
+	trace := result.Trace()
+	want := []easyext.Link{{Code: shop.RapidDeliveryCode, Kind: easyext.KindAbility}, {Code: shop.FreshCode, Kind: easyext.KindBusiness}}
+	if trace.Business != shop.FreshCode || !slices.Equal(trace.Chain, want) || !slices.Equal(trace.Skipped, []string{shop.FreeShippingCode}) {
+		t.Fatalf("trace = %+v", trace)
 	}
-	if _, err := easyext.First[shop.Freight](context.Background()); !errors.Is(err, easyext.ErrNoBinding) {
-		t.Fatalf("First unbound: err = %v", err)
+	if got := result.String(); got != "Resolution[business=biz.fresh, chain=[ability.rapid biz.fresh], skipped=[ability.free-shipping]]" {
+		t.Fatalf("String = %q", got)
 	}
+	x, err := result.Explain[shop.Freight]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x.Point != "shop.Freight" || x.Selected != (easyext.Link{Code: shop.FreshCode, Kind: easyext.KindBusiness}) {
+		t.Fatalf("explanation = %+v", x)
+	}
+	reasons := make([]string, len(x.Candidates))
+	for i, candidate := range x.Candidates {
+		reasons[i] = candidate.Reason
+		if candidate.Position != i {
+			t.Errorf("candidate %d position = %d", i, candidate.Position)
+		}
+	}
+	if !slices.Equal(reasons, []string{"match-false", "not-implemented", "selected", "lower-priority"}) ||
+		!x.Candidates[0].Implements || x.Candidates[0].Active {
+		t.Fatalf("candidates = %+v", x.Candidates)
+	}
+	trace.Chain[0].Code = "changed"
+	trace.Skipped[0] = "changed"
+	x.Candidates[0].Code = "changed"
+	if result.Trace().Chain[0].Code != shop.RapidDeliveryCode || result.Trace().Skipped[0] != shop.FreeShippingCode {
+		t.Fatal("trace shares mutable state")
+	}
+}
 
-	parent, err := c.Bind(context.Background(), shop.Param{Biz: "fresh"})
+func TestBindIsPerContextAndRegistry(t *testing.T) {
+	registry := mustBuild(t, shopBuilder())
+	for name, call := range map[string]func() error{
+		"From":  func() error { _, err := registry.From(context.Background()); return err },
+		"First": func() error { _, err := registry.First[shop.Freight](context.Background()); return err },
+		"All":   func() error { _, err := registry.All[shop.Freight](context.Background()); return err },
+	} {
+		if err := call(); !errors.Is(err, easyext.ErrNoBinding) {
+			t.Fatalf("%s unbound: %v", name, err)
+		}
+	}
+	parent, err := registry.Bind(context.Background(), shop.Param{Biz: "fresh"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// v1: a child context shared the parent's mutable session, so work on the child changed the parent.
-	child, err := c.Bind(parent, shop.Param{Biz: "fresh", Abilities: []string{"free-shipping"}})
+	child, err := registry.Bind(parent, shop.Param{Biz: "fresh", Abilities: []string{"free-shipping"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	freight := func(ctx context.Context) int {
-		f, err := easyext.First[shop.Freight](ctx)
+	freight := func(r *easyext.Registry[shop.Param], ctx context.Context) int {
+		impl, err := r.First[shop.Freight](ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return f.Freight(shop.Order{Items: 3})
+		return impl.Freight(shop.Order{Items: 3})
 	}
-	if p, ch := freight(parent), freight(child); p != 21 || ch != 0 {
-		t.Fatalf("parent = %d (want 21), child = %d (want 0)", p, ch)
+	if a, b := freight(registry, parent), freight(registry, child); a != 21 || b != 0 {
+		t.Fatalf("parent = %d, child = %d", a, b)
 	}
-
-	all, err := easyext.All[shop.Notify](parent)
+	other := mustBuild(t, shopBuilder())
+	if _, err := other.From(child); !errors.Is(err, easyext.ErrNoBinding) {
+		t.Fatalf("unbound registry saw foreign binding: %v", err)
+	}
+	both, err := other.Bind(child, shop.Param{Biz: "digital"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(slices.Collect(all)); n != 1 {
-		t.Fatalf("All[Notify] for fresh alone: %d implementations, want the default only", n)
+	if a, b := freight(registry, both), freight(other, both); a != 0 || b != 8 {
+		t.Fatalf("registry bindings overwrite each other: %d, %d", a, b)
 	}
-	if _, err := easyext.All[unregistered](parent); !errors.Is(err, easyext.ErrExtensionNotFound) {
-		t.Fatalf("All unregistered: err = %v", err)
-	}
-
-	if _, err := c.Bind(context.Background(), shop.Param{Biz: "unknown"}); !errors.Is(err, easyext.ErrNoBusinessMatched) {
-		t.Fatalf("Bind error: %v", err)
+	sequence, err := registry.All[shop.Notify](parent)
+	if err != nil || len(slices.Collect(sequence)) != 1 {
+		t.Fatalf("bound All: %v", err)
 	}
 }
 
-// v1: concurrent InitSession on contexts derived from one request was a data race. Run with -race.
 func TestConcurrentUse(t *testing.T) {
-	c := mustBuild(t, shopBuilder())
-	root, err := c.Bind(context.Background(), shop.Param{Biz: "digital"})
+	registry := mustBuild(t, shopBuilder())
+	root, err := registry.Bind(context.Background(), shop.Param{Biz: "digital"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	result := mustResolve(t, registry, shop.Param{Biz: "fresh", Abilities: []string{"rapid"}})
 	var wg sync.WaitGroup
 	for i := range 32 {
 		wg.Go(func() {
-			p := shop.Param{Biz: "fresh"}
+			param := shop.Param{Biz: "fresh"}
 			if i%2 == 0 {
-				p.Abilities = []string{"free-shipping"}
+				param.Abilities = []string{"free-shipping"}
 			}
-			ctx, err := c.Bind(root, p)
+			ctx, err := registry.Bind(root, param)
 			if err != nil {
 				t.Error(err)
 				return
@@ -319,54 +314,89 @@ func TestConcurrentUse(t *testing.T) {
 			if i%2 == 0 {
 				want = 0
 			}
-			if f, _ := easyext.First[shop.Freight](ctx); f.Freight(shop.Order{Items: 3}) != want {
+			impl, err := registry.First[shop.Freight](ctx)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if impl.Freight(shop.Order{Items: 3}) != want {
 				t.Errorf("goroutine %d: wrong freight", i)
 			}
+			if _, err := result.Explain[shop.Notify](); err != nil {
+				t.Error(err)
+			}
+			sequence, err := result.All[shop.Delivery]()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if len(slices.Collect(sequence)) != 3 {
+				t.Error("shared resolution changed")
+			}
+			registry.Catalog()
+			result.Trace()
 		})
 	}
 	wg.Wait()
-	if d, _ := easyext.First[shop.AfterSale](root); d.ReturnDays() != 15 {
+	impl, err := registry.First[shop.AfterSale](root)
+	if err != nil || impl.ReturnDays() != 15 {
 		t.Fatal("root binding changed")
 	}
 }
 
-// v1 used one global context: registrations of one test leaked into the next.
-func TestContextsAreIndependent(t *testing.T) {
-	a := mustBuild(t, shopBuilder())
-	b := mustBuild(t, easyext.New[shop.Param]().Point[shop.Freight](shop.DefaultFreight{}).Business("biz.fresh", shop.Fresh{}))
-	if len(a.Catalog().Businesses) != 3 || len(b.Catalog().Businesses) != 1 {
-		t.Fatal("contexts share state")
+func TestBuildOrderIsNotCompositionOrder(t *testing.T) {
+	registry := mustBuild(t, easyext.New[shop.Param]().
+		Business(shop.Fresh{}).
+		Ability(shop.RapidDelivery{}).Ability(shop.FreeShipping{}).
+		Default(shop.Defaults{}).
+		Point[shop.Freight]().Point[shop.Notify]().Point[shop.Delivery]())
+	result := mustResolve(t, registry, shop.Param{Biz: "fresh", Abilities: []string{"free-shipping", "rapid"}})
+	if first[shop.Freight](t, result).Freight(shop.Order{}) != 0 || first[shop.Delivery](t, result).DeliveryDays() != 1 {
+		t.Fatal("registration order changed precedence")
+	}
+	if registry.Catalog().Businesses[0].Abilities[0] != shop.FreeShippingCode {
+		t.Fatal("business declaration ignored")
 	}
 }
 
-func TestBusinessImplementingNothing(t *testing.T) {
-	c := mustBuild(t, easyext.New[shop.Param]().
-		Point[shop.Freight](shop.DefaultFreight{}).
-		Ability("ability.free-shipping", shop.FreeShipping{}).
-		Business("biz.trial", easyext.MatcherFunc[shop.Param](func(p shop.Param) bool { return p.Biz == "trial" }),
-			easyext.Abilities("ability.free-shipping")))
-	if got := mustResolve(t, c, shop.Param{Biz: "trial"}).First[shop.Freight]().Freight(shop.Order{}); got != 8 {
-		t.Fatalf("freight = %d", got)
+func TestRegistriesAndBuildCallsAreIndependent(t *testing.T) {
+	builder := shopBuilder()
+	a, b := mustBuild(t, builder), mustBuild(t, builder)
+	ctx, err := a.Bind(context.Background(), shop.Param{Biz: "fresh"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := mustResolve(t, c, shop.Param{Biz: "trial", Abilities: []string{"free-shipping"}}).First[shop.Freight]().Freight(shop.Order{}); got != 0 {
-		t.Fatalf("freight = %d", got)
+	if _, err := b.From(ctx); !errors.Is(err, easyext.ErrNoBinding) {
+		t.Fatalf("Build calls share binding identity: %v", err)
+	}
+	builder.Business(&testBusiness[shop.Param]{code: "extra", match: func(shop.Param) bool { return false }})
+	if len(a.Catalog().Businesses) != 3 || len(mustBuild(t, builder).Catalog().Businesses) != 4 {
+		t.Fatal("builder mutation affected a built registry")
 	}
 }
 
 func TestCatalog(t *testing.T) {
-	cat := mustBuild(t, shopBuilder().Strict(false)).Catalog()
-	if cat.ParamType != "shop.Param" || cat.Strict || len(cat.Points) != 3 || cat.Points[0] != (easyext.PointInfo{Type: "shop.Freight", Default: "shop.DefaultFreight"}) {
-		t.Fatalf("catalog = %+v", cat)
+	registry := mustBuild(t, shopBuilder())
+	catalog := registry.Catalog()
+	if catalog.ParamType != "shop.Param" || len(catalog.Points) != 4 ||
+		catalog.Points[0] != (easyext.PointInfo{Type: "shop.Freight", Default: "shop.Defaults"}) {
+		t.Fatalf("catalog = %+v", catalog)
 	}
-	if a := cat.Abilities[0]; a.Code != "ability.free-shipping" || !slices.Equal(a.Points, []string{"shop.Freight"}) {
-		t.Fatalf("abilities = %+v", cat.Abilities)
+	if rapid := catalog.Abilities[2]; !slices.Equal(rapid.Points, []string{"shop.Notify", "shop.Delivery"}) {
+		t.Fatalf("rapid = %+v", rapid)
 	}
-	fresh := cat.Businesses[1]
-	if fresh.Code != "biz.fresh" || !slices.Equal(fresh.Order, []string{"ability.free-shipping", "ability.rapid", easyext.Self}) ||
-		!slices.Equal(fresh.Points, []string{"shop.Freight"}) {
+	if fresh := catalog.Businesses[1]; !slices.Equal(fresh.Points, []string{"shop.Freight", "shop.Delivery"}) ||
+		!slices.Equal(fresh.Abilities, []string{shop.FreeShippingCode, shop.RapidDeliveryCode, easyext.Self}) {
 		t.Fatalf("fresh = %+v", fresh)
 	}
-	if retail := cat.Businesses[0]; !slices.Equal(retail.Order, []string{easyext.Self, "ability.free-shipping", "ability.return-7d"}) {
-		t.Fatalf("retail order = %v", retail.Order)
+	if retail := catalog.Businesses[0]; retail.Abilities[0] != easyext.Self {
+		t.Fatalf("implicit Self = %+v", retail)
+	}
+	catalog.Points[0].Default = "changed"
+	catalog.Abilities[2].Points[0] = "changed"
+	catalog.Businesses[1].Abilities[0] = "changed"
+	if got := registry.Catalog(); got.Points[0].Default != "shop.Defaults" || got.Abilities[2].Points[0] != "shop.Notify" ||
+		got.Businesses[1].Abilities[0] != shop.FreeShippingCode {
+		t.Fatal("catalog shares mutable slices")
 	}
 }

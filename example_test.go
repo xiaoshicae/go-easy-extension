@@ -3,80 +3,89 @@ package easyext_test
 import (
 	"context"
 	"fmt"
-	"slices"
+	"os"
+	"strings"
+	"testing"
 
-	"github.com/xiaoshicae/go-easy-extension/v2"
+	"github.com/xiaoshicae/go-easy-extension/v3"
 )
 
-// OrderParam identifies a request: the business line and the abilities it asks for.
+// These types also demonstrate that business metadata belongs to the component itself.
 type OrderParam struct {
-	Biz       string
-	Abilities []string
+	Biz          string
+	FreeShipping bool
 }
 
-// Freight is an extension point: the generic checkout flow depends on it.
 type Freight interface{ Calc(items int) int }
+type Delivery interface{ DeliveryDays() int }
 
-// DefaultFreight answers when neither the business nor its abilities implement Freight.
-type DefaultFreight struct{}
+type CommerceDefaults struct{}
 
-func (DefaultFreight) Calc(int) int { return 8 }
+func (CommerceDefaults) Calc(int) int      { return 8 }
+func (CommerceDefaults) DeliveryDays() int { return 3 }
 
-// FreeShipping is an ability: any business may mount it, and it applies when the request asks for it.
 type FreeShipping struct{}
 
-func (FreeShipping) Match(p OrderParam) bool { return slices.Contains(p.Abilities, "free-shipping") }
+func (FreeShipping) Code() string            { return "ability.free-shipping" }
+func (FreeShipping) Match(p OrderParam) bool { return p.FreeShipping }
 func (FreeShipping) Calc(int) int            { return 0 }
 
-// Fresh is a business with its own cold-chain freight.
 type Fresh struct{}
 
+func (Fresh) Code() string            { return "biz.fresh" }
 func (Fresh) Match(p OrderParam) bool { return p.Biz == "fresh" }
+func (Fresh) Abilities() []string     { return []string{"ability.free-shipping", easyext.Self} }
 func (Fresh) Calc(items int) int      { return 15 + 2*items }
+func (Fresh) DeliveryDays() int       { return 2 }
 
-// Retail is a business that only mounts abilities.
 type Retail struct{}
 
+func (Retail) Code() string            { return "biz.retail" }
 func (Retail) Match(p OrderParam) bool { return p.Biz == "retail" }
+func (Retail) Abilities() []string     { return []string{"ability.free-shipping"} }
+
+func exampleRegistry() (*easyext.Registry[OrderParam], error) {
+	return easyext.New[OrderParam]().Point[Freight]().Point[Delivery]().Default(CommerceDefaults{}).
+		Ability(FreeShipping{}).Business(Fresh{}).Business(Retail{}).Build()
+}
 
 func Example() {
-	c, err := easyext.New[OrderParam]().
-		Point[Freight](DefaultFreight{}).
-		Ability("ability.free-shipping", FreeShipping{}).
-		Business("biz.fresh", Fresh{}, easyext.Abilities("ability.free-shipping", easyext.Self)).
-		Business("biz.retail", Retail{}, easyext.Abilities("ability.free-shipping")).
-		Build()
+	registry, err := exampleRegistry()
 	if err != nil {
 		panic(err)
 	}
-
-	for _, p := range []OrderParam{
-		{Biz: "fresh"},
-		{Biz: "fresh", Abilities: []string{"free-shipping"}},
-		{Biz: "retail"},
-	} {
-		ctx, err := c.Bind(context.Background(), p) // once per request, e.g. in a middleware
+	for _, param := range []OrderParam{{Biz: "fresh"}, {Biz: "fresh", FreeShipping: true}, {Biz: "retail"}} {
+		ctx, err := registry.Bind(context.Background(), param)
 		if err != nil {
 			panic(err)
 		}
-		freight, _ := easyext.First[Freight](ctx) // anywhere below
-		fmt.Println(p, "->", freight.Calc(3))
+		freight, err := registry.First[Freight](ctx)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println(param.Biz, param.FreeShipping, "->", freight.Calc(3))
 	}
 	// Output:
-	// {fresh []} -> 21
-	// {fresh [free-shipping]} -> 0
-	// {retail []} -> 8
+	// fresh false -> 21
+	// fresh true -> 0
+	// retail false -> 8
 }
 
 func ExampleResolution_All() {
-	c, _ := easyext.New[OrderParam]().
-		Point[Freight](DefaultFreight{}).
-		Ability("ability.free-shipping", FreeShipping{}).
-		Business("biz.fresh", Fresh{}, easyext.Abilities("ability.free-shipping", easyext.Self)).
-		Build()
-	r, _ := c.Resolve(OrderParam{Biz: "fresh", Abilities: []string{"free-shipping"}})
-	for f := range r.All[Freight]() {
-		fmt.Println(f.Calc(3))
+	registry, err := exampleRegistry()
+	if err != nil {
+		panic(err)
+	}
+	result, err := registry.Resolve(OrderParam{Biz: "fresh", FreeShipping: true})
+	if err != nil {
+		panic(err)
+	}
+	sequence, err := result.All[Freight]()
+	if err != nil {
+		panic(err)
+	}
+	for impl := range sequence {
+		fmt.Println(impl.Calc(3))
 	}
 	// Output:
 	// 0
@@ -85,31 +94,52 @@ func ExampleResolution_All() {
 }
 
 func ExampleResolution_Explain() {
-	c, _ := easyext.New[OrderParam]().
-		Point[Freight](DefaultFreight{}).
-		Ability("ability.free-shipping", FreeShipping{}).
-		Business("biz.fresh", Fresh{}, easyext.Abilities("ability.free-shipping", easyext.Self)).
-		Build()
-	r, _ := c.Resolve(OrderParam{Biz: "fresh"})
-	fmt.Println(r)
-	x := r.Explain[Freight]()
-	for _, cand := range x.Candidates {
-		fmt.Println(cand.Kind, cand.Code, cand.Implements)
+	registry, err := exampleRegistry()
+	if err != nil {
+		panic(err)
+	}
+	result, err := registry.Resolve(OrderParam{Biz: "fresh"})
+	if err != nil {
+		panic(err)
+	}
+	x, err := result.Explain[Freight]()
+	if err != nil {
+		panic(err)
+	}
+	for _, candidate := range x.Candidates {
+		fmt.Println(candidate.Kind, candidate.Code, candidate.Reason)
 	}
 	fmt.Println("selected:", x.Selected.Code)
 	// Output:
-	// Resolution[business=biz.fresh, chain=[biz.fresh], skipped=[ability.free-shipping]]
-	// business biz.fresh true
-	// default easyext_test.DefaultFreight true
+	// ability ability.free-shipping match-false
+	// business biz.fresh selected
+	// default easyext_test.CommerceDefaults lower-priority
 	// selected: biz.fresh
 }
 
+type missingAbilityBusiness struct{ Fresh }
+
+func (missingAbilityBusiness) Abilities() []string { return []string{"ability.missing"} }
+
 func ExampleBuilder_Build_invalid() {
-	_, err := easyext.New[OrderParam]().
-		Point[Freight](DefaultFreight{}).
-		Business("biz.fresh", Fresh{}, easyext.Abilities("ability.missing")).
-		Build()
+	_, err := easyext.New[OrderParam]().Point[Freight]().Default(CommerceDefaults{}).
+		Business(missingAbilityBusiness{}).Build()
 	fmt.Println(err)
 	// Output:
-	// easyext: invalid assembly: business "biz.fresh": mounts unknown ability "ability.missing"
+	// easyext: invalid assembly: business "biz.fresh": uses unknown ability "ability.missing"
+}
+
+func TestREADMEExampleMatchesExecutableSource(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile("examples/shop/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := "```go\n" + strings.TrimSpace(string(source)) + "\n```"
+	if !strings.Contains(string(readme), block) {
+		t.Fatal("README's complete example differs from examples/shop/main.go")
+	}
 }
