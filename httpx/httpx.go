@@ -1,6 +1,6 @@
 // Package httpx binds net/http requests to a business: the middleware derives the param from the request,
-// resolves it and passes a bound context to the next handler, so that easyext.First / easyext.All work
-// anywhere below it.
+// resolves it and passes a bound context to the next handler. Use the same Registry's First or All
+// methods in downstream code; unrelated registries' bindings are not affected.
 //
 // Wrap only the routes that use extension points; health checks and the like then need no business identity.
 package httpx
@@ -9,7 +9,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/xiaoshicae/go-easy-extension/v2"
+	"github.com/xiaoshicae/go-easy-extension/v3"
 )
 
 // ErrorHandler writes the response when a request cannot be bound.
@@ -32,11 +32,10 @@ func OnError(h ErrorHandler) Option {
 //
 // Default responses, with the status text only (the details, which may name businesses, are left to [OnError]):
 //   - 400 Bad Request: the param function failed;
-//   - 422 Unprocessable Entity: the request identifies no business, or an unknown one ([easyext.ErrNoBusinessMatched],
-//     [easyext.ErrBusinessNotFound]): the caller has to fix the request;
+//   - 422 Unprocessable Entity: no business matches ([easyext.ErrNoBusinessMatched]);
 //   - 500 Internal Server Error: anything else, e.g. several businesses match ([easyext.ErrMultipleBusinessesMatched]),
 //     which is a problem of the assembly, not of the request.
-func Middleware[T any](c *easyext.Context[T], param func(*http.Request) (T, error), opts ...Option) func(http.Handler) http.Handler {
+func Middleware[P any](registry *easyext.Registry[P], param func(*http.Request) (P, error), opts ...Option) func(http.Handler) http.Handler {
 	o := options{onError: defaultOnError}
 	for _, opt := range opts {
 		opt(&o)
@@ -48,7 +47,7 @@ func Middleware[T any](c *easyext.Context[T], param func(*http.Request) (T, erro
 				o.onError(w, r, &ParamError{Err: err})
 				return
 			}
-			ctx, err := c.Bind(r.Context(), p)
+			ctx, err := registry.Bind(r.Context(), p)
 			if err != nil {
 				o.onError(w, r, err)
 				return
@@ -72,7 +71,7 @@ func defaultOnError(w http.ResponseWriter, _ *http.Request, err error) {
 	switch {
 	case errors.As(err, new(*ParamError)):
 		status = http.StatusBadRequest
-	case errors.Is(err, easyext.ErrNoBusinessMatched), errors.Is(err, easyext.ErrBusinessNotFound):
+	case errors.Is(err, easyext.ErrNoBusinessMatched):
 		status = http.StatusUnprocessableEntity
 	}
 	http.Error(w, http.StatusText(status), status)

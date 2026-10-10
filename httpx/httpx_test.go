@@ -9,22 +9,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xiaoshicae/go-easy-extension/v2"
-	"github.com/xiaoshicae/go-easy-extension/v2/httpx"
-	"github.com/xiaoshicae/go-easy-extension/v2/internal/fixtures/shop"
+	"github.com/xiaoshicae/go-easy-extension/v3"
+	"github.com/xiaoshicae/go-easy-extension/v3/httpx"
+	"github.com/xiaoshicae/go-easy-extension/v3/internal/fixtures/shop"
 )
 
-func newContext(t *testing.T) *easyext.Context[shop.Param] {
+func newRegistry(t *testing.T) *easyext.Registry[shop.Param] {
 	t.Helper()
-	c, err := easyext.New[shop.Param]().
-		Point[shop.Freight](shop.DefaultFreight{}).
-		Ability("ability.free-shipping", shop.FreeShipping{}).
-		Business("biz.fresh", shop.Fresh{}, easyext.Abilities("ability.free-shipping", easyext.Self)).
-		Build()
+	registry, err := easyext.New[shop.Param]().
+		Point[shop.Freight]().Point[shop.Notify]().Point[shop.Delivery]().Default(shop.Defaults{}).
+		Ability(shop.FreeShipping{}).Ability(shop.RapidDelivery{}).Business(shop.Fresh{}).Build()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c
+	return registry
 }
 
 func paramFromRequest(r *http.Request) (shop.Param, error) {
@@ -33,94 +31,122 @@ func paramFromRequest(r *http.Request) (shop.Param, error) {
 		return shop.Param{}, errors.New("missing X-Biz header")
 	}
 	var abilities []string
-	if a := r.URL.Query().Get("abilities"); a != "" {
-		abilities = strings.Split(a, ",")
+	if value := r.URL.Query().Get("abilities"); value != "" {
+		abilities = strings.Split(value, ",")
 	}
 	return shop.Param{Biz: biz, Abilities: abilities}, nil
 }
 
-var freightHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	f, err := easyext.First[shop.Freight](r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	fmt.Fprint(w, f.Freight(shop.Order{Items: 3}))
-})
+func freightHandler(registry *easyext.Registry[shop.Param]) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		impl, err := registry.First[shop.Freight](r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, impl.Freight(shop.Order{Items: 3}))
+	})
+}
 
-func serve(h http.Handler, header, target string) (int, string) {
+func serve(handler http.Handler, header, target string) (int, string) {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	if header != "" {
 		req.Header.Set("X-Biz", header)
 	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	body, _ := io.ReadAll(rec.Result().Body)
-	return rec.Code, strings.TrimSpace(string(body))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	response := recorder.Result()
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	return recorder.Code, strings.TrimSpace(string(body))
 }
 
 func TestMiddleware(t *testing.T) {
-	h := httpx.Middleware(newContext(t), paramFromRequest)(freightHandler)
-	tests := []struct {
+	registry := newRegistry(t)
+	handler := httpx.Middleware(registry, paramFromRequest)(freightHandler(registry))
+	for _, tt := range []struct {
 		name, header, target string
-		code                 int
+		status               int
 		body                 string
 	}{
-		{"bound to fresh", "fresh", "/checkout", 200, "21"},
+		{"fresh", "fresh", "/checkout", 200, "21"},
 		{"free shipping overrides fresh", "fresh", "/checkout?abilities=free-shipping", 200, "0"},
 		{"param error", "", "/checkout", 400, "Bad Request"},
-		{"no business (strict)", "unknown", "/checkout", 422, "Unprocessable Entity"},
-	}
-	for _, tt := range tests {
+		{"no business", "unknown", "/checkout", 422, "Unprocessable Entity"},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if code, body := serve(h, tt.header, tt.target); code != tt.code || body != tt.body {
-				t.Fatalf("got %d %q, want %d %q", code, body, tt.code, tt.body)
+			if status, body := serve(handler, tt.header, tt.target); status != tt.status || body != tt.body {
+				t.Fatalf("got %d %q, want %d %q", status, body, tt.status, tt.body)
 			}
 		})
 	}
 }
 
-// Two matching businesses is a problem of the assembly, not of the request: 500, not 422.
+type otherFresh struct{ shop.Fresh }
+
+func (otherFresh) Code() string { return "biz.fresh-too" }
+
 func TestSeveralBusinessesIsAServerError(t *testing.T) {
-	c, err := easyext.New[shop.Param]().
-		Point[shop.Freight](shop.DefaultFreight{}).
-		Business("biz.fresh", shop.Fresh{}).
-		Business("biz.fresh-too", shop.Fresh{}).
-		Build()
+	registry, err := easyext.New[shop.Param]().
+		Point[shop.Freight]().Point[shop.Notify]().Point[shop.Delivery]().Default(shop.Defaults{}).
+		Ability(shop.FreeShipping{}).Ability(shop.RapidDelivery{}).
+		Business(shop.Fresh{}).Business(otherFresh{}).Build()
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := httpx.Middleware(c, paramFromRequest)(freightHandler)
-	if code, body := serve(h, "fresh", "/"); code != 500 || body != "Internal Server Error" {
-		t.Fatalf("got %d %q", code, body)
+	handler := httpx.Middleware(registry, paramFromRequest)(freightHandler(registry))
+	if status, body := serve(handler, "fresh", "/"); status != 500 || body != "Internal Server Error" {
+		t.Fatalf("got %d %q", status, body)
 	}
 }
 
 func TestOnError(t *testing.T) {
+	registry := newRegistry(t)
 	var got error
-	h := httpx.Middleware(newContext(t), paramFromRequest, httpx.OnError(func(w http.ResponseWriter, _ *http.Request, err error) {
+	handler := httpx.Middleware(registry, paramFromRequest, httpx.OnError(func(w http.ResponseWriter, _ *http.Request, err error) {
 		got = err
 		http.Error(w, "custom", http.StatusTeapot)
-	}))(freightHandler)
-
-	if code, body := serve(h, "unknown", "/"); code != http.StatusTeapot || body != "custom" || !errors.Is(got, easyext.ErrNoBusinessMatched) {
-		t.Fatalf("got %d %q, err %v", code, body, got)
+	}))(freightHandler(registry))
+	if status, body := serve(handler, "unknown", "/"); status != http.StatusTeapot || body != "custom" || !errors.Is(got, easyext.ErrNoBusinessMatched) {
+		t.Fatalf("got %d %q, err %v", status, body, got)
 	}
-	serve(h, "", "/")
-	pe, ok := errors.AsType[*httpx.ParamError](got)
-	if !ok || pe.Error() != "httpx: deriving the matcher param: missing X-Biz header" || errors.Unwrap(pe).Error() != "missing X-Biz header" {
+	serve(handler, "", "/")
+	var paramError *httpx.ParamError
+	if !errors.As(got, &paramError) || paramError.Error() != "httpx: deriving the matcher param: missing X-Biz header" ||
+		errors.Unwrap(paramError).Error() != "missing X-Biz header" {
 		t.Fatalf("param error = %v", got)
 	}
 }
 
 func TestUnwrappedRoutesAreNotBound(t *testing.T) {
+	registry := newRegistry(t)
 	mux := http.NewServeMux()
-	mux.Handle("/checkout", httpx.Middleware(newContext(t), paramFromRequest)(freightHandler))
-	mux.Handle("/health", freightHandler) // not wrapped: no business identity required, nothing bound
-	if code, body := serve(mux, "", "/health"); code != 500 || !strings.Contains(body, "NO_BINDING") {
-		t.Fatalf("got %d %q", code, body)
+	mux.Handle("/checkout", httpx.Middleware(registry, paramFromRequest)(freightHandler(registry)))
+	mux.Handle("/health", freightHandler(registry))
+	if status, body := serve(mux, "", "/health"); status != 500 || !strings.Contains(body, "NO_BINDING") {
+		t.Fatalf("got %d %q", status, body)
 	}
-	if code, body := serve(mux, "fresh", "/checkout"); code != 200 || body != "21" {
-		t.Fatalf("got %d %q", code, body)
+	if status, body := serve(mux, "fresh", "/checkout"); status != 200 || body != "21" {
+		t.Fatalf("got %d %q", status, body)
+	}
+}
+
+func TestNestedMiddlewareKeepsBothRegistryBindings(t *testing.T) {
+	a, b := newRegistry(t), newRegistry(t)
+	check := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fa, ea := a.First[shop.Freight](r.Context())
+		fb, eb := b.First[shop.Freight](r.Context())
+		if ea != nil || eb != nil {
+			t.Errorf("bindings: %v / %v", ea, eb)
+			return
+		}
+		fmt.Fprintf(w, "%d/%d", fa.Freight(shop.Order{Items: 3}), fb.Freight(shop.Order{Items: 3}))
+	})
+	handler := httpx.Middleware(a, paramFromRequest)(
+		httpx.Middleware(b, func(*http.Request) (shop.Param, error) {
+			return shop.Param{Biz: "fresh", Abilities: []string{"free-shipping"}}, nil
+		})(check))
+	if status, body := serve(handler, "fresh", "/"); status != 200 || body != "21/0" {
+		t.Fatalf("got %d %q", status, body)
 	}
 }

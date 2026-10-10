@@ -6,22 +6,21 @@ import (
 	"slices"
 )
 
-// Catalog is a read-only description of an assembly, e.g. for an admin page or a startup log.
+// Catalog describes the registered components. Every call returns independent slices.
 type Catalog struct {
 	ParamType  string
-	Strict     bool
-	Points     []PointInfo    // registration order
-	Abilities  []AbilityInfo  // registration order
-	Businesses []BusinessInfo // registration order
+	Points     []PointInfo
+	Abilities  []AbilityInfo
+	Businesses []BusinessInfo
 }
 
-// PointInfo describes a registered extension point.
+// PointInfo describes an extension point and the type of its default implementation.
 type PointInfo struct {
-	Type    string // e.g. "shop.FreightCalc"
-	Default string // type of the default implementation
+	Type    string
+	Default string
 }
 
-// AbilityInfo describes a registered ability.
+// AbilityInfo describes the snapshotted metadata and inferred points of an ability.
 type AbilityInfo struct {
 	Code     string
 	Type     string
@@ -30,43 +29,47 @@ type AbilityInfo struct {
 	Excludes []string
 }
 
-// BusinessInfo describes a registered business.
+// BusinessInfo describes a business and its declared precedence, including implicit Self.
 type BusinessInfo struct {
-	Code   string
-	Type   string
-	Points []string
-	Order  []string // resolution order: ability codes and Self
+	Code      string
+	Type      string
+	Points    []string
+	Abilities []string
 }
 
-// Catalog returns a description of everything registered. The result is a copy.
-func (c *Context[T]) Catalog() Catalog {
-	cat := Catalog{ParamType: c.paramType, Strict: c.strict}
-	for _, p := range c.points {
-		cat.Points = append(cat.Points, PointInfo{Type: p.typ.String(), Default: fmt.Sprintf("%T", p.impl)})
+// Catalog returns a copy of the metadata, not the component instances.
+// Type labels are for display; the registry identifies points by reflect.Type, never these strings.
+func (r *Registry[P]) Catalog() Catalog {
+	catalog := Catalog{ParamType: r.paramType}
+	for _, point := range r.points {
+		catalog.Points = append(catalog.Points, PointInfo{Type: point.String(), Default: fmt.Sprintf("%T", r.defaults[point].impl)})
 	}
-	for _, a := range c.abilities {
-		cat.Abilities = append(cat.Abilities, AbilityInfo{Code: a.code, Type: fmt.Sprintf("%T", a.impl), Points: typeNames(a.points),
-			Requires: slices.Clone(a.requires), Excludes: slices.Clone(a.excludes)})
+	for _, ability := range r.abilities {
+		catalog.Abilities = append(catalog.Abilities, AbilityInfo{
+			Code: ability.code, Type: fmt.Sprintf("%T", ability.matcher), Points: typeNames(ability.points),
+			Requires: slices.Clone(ability.requires), Excludes: slices.Clone(ability.excludes),
+		})
 	}
-	for _, b := range c.businesses {
-		order := make([]string, len(b.steps))
-		for i, st := range b.steps {
+	for _, business := range r.businesses {
+		order := make([]string, len(business.plan.steps))
+		for i, st := range business.plan.steps {
+			order[i] = st.Code
 			if st.ability < 0 {
 				order[i] = Self
-			} else {
-				order[i] = c.abilities[st.ability].code
 			}
 		}
-		cat.Businesses = append(cat.Businesses, BusinessInfo{Code: b.code, Type: fmt.Sprintf("%T", b.impl),
-			Points: typeNames(b.points), Order: order})
+		catalog.Businesses = append(catalog.Businesses, BusinessInfo{
+			Code: business.plan.code, Type: fmt.Sprintf("%T", business.matcher),
+			Points: typeNames(business.points), Abilities: order,
+		})
 	}
-	return cat
+	return catalog
 }
 
-func typeNames(ts []reflect.Type) []string {
-	names := make([]string, len(ts))
-	for i, t := range ts {
-		names[i] = t.String()
+func typeNames(types []reflect.Type) []string {
+	result := make([]string, len(types))
+	for i, typ := range types {
+		result[i] = typ.String()
 	}
-	return names
+	return result
 }

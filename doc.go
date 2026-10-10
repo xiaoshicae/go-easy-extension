@@ -1,27 +1,41 @@
-// Package easyext is an extension point framework: generic flows depend on interfaces (extension points),
-// and each request is answered by the implementation of its business, of the abilities that business mounts,
-// or of the extension point's default implementation. It replaces per-business if-else chains in systems
-// that serve many integration parties, such as order or fulfilment platforms.
+// Package easyext selects extension point implementations for requests belonging to different businesses.
 //
-// Assemble once, at startup:
+// A point is a non-empty Go interface. An Ability[P] supplies Code and Match, implements one or more
+// points, and can be reused by several businesses. A Business[P] supplies Code, Match and Abilities;
+// its Abilities method returns ability codes in precedence order, optionally including Self.
+// Defaults are independent components and may implement multiple points.
 //
-//	c, err := easyext.New[OrderParam]().
-//		Point[Freight](DefaultFreight{}).                       // extension point + its default implementation
-//		Ability("ability.free-shipping", FreeShipping{}).       // reusable implementation, Match decides per request
-//		Business("biz.fresh", Fresh{},                          // integration party, Match identifies its requests
-//			easyext.Abilities("ability.free-shipping", easyext.Self)). // order = precedence; Self = the business itself
-//		Build()                                                 // validates everything at once
+// Assemble at startup:
 //
-// Then, per request, bind the param to the request context (or use the httpx middleware) and look
-// extension points up anywhere below:
+//	registry, err := easyext.New[OrderParam]().
+//		Point[Freight]().Point[Delivery]().
+//		Default(&CommerceDefaults{}).
+//		Ability(&FreeShipping{}).
+//		Business(&Fresh{}).
+//		Build()
 //
-//	ctx, err := c.Bind(ctx, param)
-//	freight, err := easyext.First[Freight](ctx)
+// The component metadata belongs to the component, not to the bootstrap code:
 //
-// Resolution order: the abilities and the business itself in the order of [Abilities] (only abilities whose
-// Match returns true), then the default implementation. [Resolution.First] returns the first that implements
-// the extension point, [Resolution.All] all of them.
+//	func (*Fresh) Abilities() []string {
+//		return []string{FreeShippingCode, easyext.Self}
+//	}
 //
-// Every value built here is immutable and safe for concurrent use. The design, and how it maps to the
-// Java easy-extension 4.x, is described in doc/design-v2.md.
+// Build validates the complete assembly and snapshots metadata. Each registered point must have exactly
+// one explicit default. Optional Requires and Excludes methods constrain co-mounting, not activation or execution.
+//
+// Each Resolve must match exactly one business. Its abilities are matched once, producing an immutable
+// Resolution. First returns the first active implementation of a point, otherwise its default; All yields
+// active implementations followed by the default, deduplicating shared providers. Queries return errors
+// for unregistered points, not lookup panics.
+//
+// Either pass the Resolution explicitly or bind once and query through the same Registry:
+//
+//	ctx, err := registry.Bind(ctx, param)
+//	freight, err := registry.First[Freight](ctx)
+//
+// Bindings are isolated by Registry identity and follow context.Context into child scopes and goroutines.
+// Registry and Resolution are safe to share, but implementations themselves must be safe for concurrent calls.
+// Match should be a side-effect-free decision without external I/O.
+//
+// See examples/shop for a complete runnable example and doc/design-v3.md for the design.
 package easyext
